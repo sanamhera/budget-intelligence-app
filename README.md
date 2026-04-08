@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Budget Governance Web Application
 
 AI-powered budget governance with project budgets, invoice parsing (Gemini), payments, and approval workflows.
@@ -126,3 +127,6 @@ For local development the frontend talks to the backend only (proxy). If you lat
 ## License
 
 MIT
+=======
+# budget-intelligence-app
+>>>>>>> 793398a2b24e0539579abf97d368f5cd6fe3ac57
