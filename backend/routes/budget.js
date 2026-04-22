@@ -1,12 +1,17 @@
 /**
- * routes/budgets.js  — FY 2026-27
- * Changes vs original:
- *  + DELETE /:id  — delete with relational check (warns if invoices linked)
- *  + PATCH  /:id  — now also accepts nfaRaisedStatus, nfaRaised (amount),
- *                   nfaApproved (amount), nfaApprovedStatus (patched from Approvals page)
- *  + POST   /     — also accepts nfaRaisedStatus, nfaApprovalStatus
- *  + All writes fire audit log entries
+ * routes/budgets.js  — FY Container
+ *
+ * A "budget" is just a financial-year label.
+ * The first request to GET / auto-creates FY 26-27 if no budgets exist.
+ *
+ * Routes:
+ *   GET    /api/budgets          — list all FY containers (auto-seeds FY 26-27)
+ *   GET    /api/budgets/:id      — single budget
+ *   POST   /api/budgets          — create new FY container (Admin/Finance)
+ *   PATCH  /api/budgets/:id      — rename (Admin only)
+ *   DELETE /api/budgets/:id      — delete (Admin only, only if no expenses)
  */
+
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { db }  = require('../config/firebase');
@@ -15,171 +20,137 @@ const { auth, requireRole } = require('../middleware/auth');
 const router = express.Router();
 router.use(auth);
 
-const STATUS = ['Active', 'Overrun', 'Closed'];
-
-function getStatus(allocated, spent) {
-  return spent > allocated ? 'Overrun' : 'Active';
-}
+const DEFAULT_FY = 'FY 26-27';
 
 /* ── audit helper ───────────────────────────────────────────── */
-async function audit({ user, module: mod, action, recordId, oldValue, newValue }) {
+async function audit({ user, action, recordId, newValue, oldValue }) {
   try {
     await db.collection('audit').add({
       user:      user?.name || user?.email || 'Unknown',
-      module:    mod,
+      module:    'Budget',
       action,
       recordId:  recordId || null,
-      oldValue:  oldValue  != null ? JSON.stringify(oldValue)  : null,
-      newValue:  newValue  != null ? JSON.stringify(newValue)  : null,
+      oldValue:  oldValue != null ? JSON.stringify(oldValue) : null,
+      newValue:  newValue != null ? JSON.stringify(newValue) : null,
       timestamp: new Date(),
     });
-  } catch { /* never break main flow */ }
+  } catch {}
 }
 
-/* ── GET all ─────────────────────────────────────────────────── */
+/* ── auto-seed default FY ───────────────────────────────────── */
+// Use a sentinel doc to prevent race-condition duplicate seeding
+async function seedDefaultIfEmpty() {
+  const snap = await db.collection('budgets').where('fy', '==', DEFAULT_FY).limit(1).get();
+  if (!snap.empty) return { id: snap.docs[0].id, ...snap.docs[0].data() };
+  // Double-check with a named sentinel to prevent concurrent duplicate inserts
+  const sentinelRef = db.collection('budgets').doc('_seed_fy2627');
+  const sentinel = await sentinelRef.get();
+  if (sentinel.exists) return { id: sentinel.id, ...sentinel.data() };
+  const data = {
+    fy:        DEFAULT_FY,
+    name:      DEFAULT_FY,
+    createdAt: new Date(),
+    isDefault: true,
+  };
+  await sentinelRef.set(data);
+  return { id: sentinelRef.id, ...data };
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   GET /api/budgets
+═══════════════════════════════════════════════════════════════ */
 router.get('/', async (req, res) => {
   try {
-    const snap = await db.collection('budgets').orderBy('createdAt', 'desc').get();
+    await seedDefaultIfEmpty();
+    const snap = await db.collection('budgets').orderBy('createdAt', 'asc').get();
     res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ── GET single ──────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════
+   GET /api/budgets/:id
+═══════════════════════════════════════════════════════════════ */
 router.get('/:id', async (req, res) => {
   try {
     const doc = await db.collection('budgets').doc(req.params.id).get();
-    if (!doc.exists) return res.status(404).json({ error: 'Not found' });
+    if (!doc.exists) return res.status(404).json({ error: 'Budget not found' });
     res.json({ id: doc.id, ...doc.data() });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ── POST create ─────────────────────────────────────────────── */
-/* Sub-tasks/sub-projects can be created by any authenticated role;
-   top-level project creation still requires Admin or Finance.       */
-router.post('/', async (req, res) => {
+/* ═══════════════════════════════════════════════════════════════
+   POST /api/budgets  — create new FY container
+═══════════════════════════════════════════════════════════════ */
+router.post('/', requireRole('Admin', 'Finance'), [
+  body('fy').notEmpty().withMessage('FY label is required e.g. FY 27-28'),
+], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const {
-      name, allocated, description,
-      businessUnit, category, spendCategory, investmentType, budgetType,
-      nfaRaisedStatus, nfaApprovalStatus,
-      // Sub-project fields
-      parentProjectId, isSubProject, itemType, nfaRequired,
-      taskName,
-    } = req.body;
-
-    // Top-level projects still require Admin/Finance
-    if (!parentProjectId) {
-      const allowed = ['Admin', 'Finance'];
-      if (!allowed.includes(req.user?.role)) {
-        return res.status(403).json({ error: 'Only Admin or Finance can create top-level projects.' });
-      }
-    }
+    // Prevent duplicate FY
+    const existing = await db.collection('budgets')
+      .where('fy', '==', req.body.fy.trim())
+      .limit(1).get();
+    if (!existing.empty)
+      return res.status(409).json({ error: `Budget for ${req.body.fy} already exists` });
 
     const data = {
-      name:              taskName || name,
-      allocated:         Number(allocated),
-      spent:             0,
-      remaining:         Number(allocated),
-      status:            'Active',
-      description:       description       || '',
-      businessUnit:      businessUnit      || '',
-      category:          category          || '',
-      spendCategory:     spendCategory     || '',
-      investmentType:    investmentType    || '',
-      budgetType:        budgetType        || '',
-      // NFA status columns
-      nfaRaisedStatus:   nfaRaisedStatus   || 'no',
-      nfaRaised:         0,
-      nfaApprovalStatus: nfaApprovalStatus || '',
-      nfaApproved:       0,
-      // Sub-project linkage
-      parentProjectId:   parentProjectId   || null,
-      isSubProject:      isSubProject      || false,
-      itemType:          itemType          || null,
-      nfaRequired:       nfaRequired       || 'no',
-      createdAt:         new Date(),
-      createdBy:         req.user.uid,
-      fy:                '2026-27',
+      fy:        req.body.fy.trim(),
+      name:      req.body.fy.trim(),
+      createdAt: new Date(),
+      createdBy: req.user.uid,
+      isDefault: false,
     };
-
     const ref = await db.collection('budgets').add(data);
-    await audit({ user: req.user, module: 'Budget', action: isSubProject ? 'AddSubTask' : 'Create', recordId: ref.id, newValue: data });
+    await audit({ user: req.user, action: 'Create FY', recordId: ref.id, newValue: data });
     res.status(201).json({ id: ref.id, ...data });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ── PATCH update ────────────────────────────────────────────── */
-router.patch('/:id', [
-  body('name').optional().notEmpty(),
-  body('allocated').optional().isFloat({ min: 0 }),
-  body('status').optional().isIn(STATUS),
-  body('nfaRaised').optional(),
-  body('nfaApproved').optional(),
+/* ═══════════════════════════════════════════════════════════════
+   PATCH /api/budgets/:id
+═══════════════════════════════════════════════════════════════ */
+router.patch('/:id', requireRole('Admin'), [
+  body('fy').optional().notEmpty(),
 ], async (req, res) => {
   try {
-    const docRef = db.collection('budgets').doc(req.params.id);
-    const doc    = await docRef.get();
+    const ref = db.collection('budgets').doc(req.params.id);
+    const doc = await ref.get();
     if (!doc.exists) return res.status(404).json({ error: 'Not found' });
-
-    const current = doc.data();
-    const old     = { id: doc.id, ...current };
     const updates = { updatedAt: new Date() };
-
-    // Editable metadata fields
-    const metaFields = ['name','description','businessUnit','category','spendClass','spendCategory','investmentType','budgetType','financialYear','status'];
-    metaFields.forEach(k => { if (req.body[k] != null) updates[k] = req.body[k]; });
-
-    if (req.body.allocated != null) {
-      updates.allocated = Number(req.body.allocated);
-      updates.remaining = updates.allocated - (current.spent || 0);
-      updates.status    = getStatus(updates.allocated, current.spent || 0);
-    }
-
-    // NFA status fields — patched by Approvals page when NFA is raised/approved
-    if (req.body.nfaRaisedStatus   != null) updates.nfaRaisedStatus   = req.body.nfaRaisedStatus;
-    if (req.body.nfaApprovalStatus != null) updates.nfaApprovalStatus = req.body.nfaApprovalStatus;
-    if (req.body.nfaApprovedStatus != null) updates.nfaApprovedStatus = req.body.nfaApprovedStatus;
-
-    // nfaRaised / nfaApproved as amounts (numbers)
-    if (req.body.nfaRaised   != null) updates.nfaRaised   = Number(req.body.nfaRaised);
-    if (req.body.nfaApproved != null) updates.nfaApproved = Number(req.body.nfaApproved);
-
-    if (Object.keys(updates).length > 1) {  // >1 because updatedAt always present
-      await docRef.update(updates);
-      await audit({ user: req.user, module: 'Budget', action: 'Edit', recordId: req.params.id, oldValue: old, newValue: updates });
-    }
-
-    const updated = await docRef.get();
-    res.json({ success: true, message: 'Project updated successfully', id: updated.id, ...updated.data() });
+    if (req.body.fy) { updates.fy = req.body.fy.trim(); updates.name = req.body.fy.trim(); }
+    await ref.update(updates);
+    const updated = await ref.get();
+    res.json({ id: updated.id, ...updated.data() });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ── DELETE ──────────────────────────────────────────────────── */
-router.delete('/:id', async (req, res) => {
+/* ═══════════════════════════════════════════════════════════════
+   DELETE /api/budgets/:id  — only if no expenses linked
+═══════════════════════════════════════════════════════════════ */
+router.delete('/:id', requireRole('Admin'), async (req, res) => {
   try {
     const ref = db.collection('budgets').doc(req.params.id);
     const doc = await ref.get();
     if (!doc.exists) return res.status(404).json({ error: 'Not found' });
-    const old = { id: doc.id, ...doc.data() };
 
-    // Relational check — warn client but still allow (frontend shows a warning dialog)
-    const linkedInvoices = await db.collection('invoices').where('budgetId', '==', req.params.id).limit(1).get();
-    const hasLinked = !linkedInvoices.empty;
+    const linked = await db.collection('expenses')
+      .where('budgetId', '==', req.params.id).limit(1).get();
+    if (!linked.empty)
+      return res.status(400).json({ error: 'Cannot delete: expenses exist under this budget' });
 
     await ref.delete();
-    await audit({ user: req.user, module: 'Budget', action: 'Delete', recordId: req.params.id, oldValue: old });
-    res.json({ success: true, hadLinkedInvoices: hasLinked });
+    await audit({ user: req.user, action: 'Delete FY', recordId: req.params.id, oldValue: doc.data() });
+    res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
