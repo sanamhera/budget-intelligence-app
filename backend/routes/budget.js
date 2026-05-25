@@ -1,90 +1,78 @@
 /**
- * routes/budgets.js  — FY Container
- *
- * A "budget" is just a financial-year label.
- * The first request to GET / auto-creates FY 26-27 if no budgets exist.
- *
- * Routes:
- *   GET    /api/budgets          — list all FY containers (auto-seeds FY 26-27)
- *   GET    /api/budgets/:id      — single budget
- *   POST   /api/budgets          — create new FY container (Admin/Finance)
- *   PATCH  /api/budgets/:id      — rename (Admin only)
- *   DELETE /api/budgets/:id      — delete (Admin only, only if no expenses)
+ * routes/budget.js  — FY Container (MongoDB)
  */
 
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { db }  = require('../config/firebase');
+const { Budget, AuditLog, Expense, ExpenseHead } = require('../models');
 const { auth, requireRole } = require('../middleware/auth');
+const { toClient, parseObjectId } = require('../utils/toClient');
 
 const router = express.Router();
 router.use(auth);
 
 const DEFAULT_FY = 'FY 26-27';
 
-/* ── audit helper ───────────────────────────────────────────── */
 async function audit({ user, action, recordId, newValue, oldValue }) {
   try {
-    await db.collection('audit').add({
-      user:      user?.name || user?.email || 'Unknown',
-      module:    'Budget',
+    await AuditLog.create({
+      user: user?.name || user?.email || 'Unknown',
+      module: 'Budget',
       action,
-      recordId:  recordId || null,
-      oldValue:  oldValue != null ? JSON.stringify(oldValue) : null,
-      newValue:  newValue != null ? JSON.stringify(newValue) : null,
+      recordId: recordId || null,
+      oldValue: oldValue != null ? JSON.stringify(oldValue) : null,
+      newValue: newValue != null ? JSON.stringify(newValue) : null,
       timestamp: new Date(),
     });
   } catch {}
 }
 
-/* ── auto-seed default FY ───────────────────────────────────── */
-// Use a sentinel doc to prevent race-condition duplicate seeding
 async function seedDefaultIfEmpty() {
-  const snap = await db.collection('budgets').where('fy', '==', DEFAULT_FY).limit(1).get();
-  if (!snap.empty) return { id: snap.docs[0].id, ...snap.docs[0].data() };
-  // Double-check with a named sentinel to prevent concurrent duplicate inserts
-  const sentinelRef = db.collection('budgets').doc('_seed_fy2627');
-  const sentinel = await sentinelRef.get();
-  if (sentinel.exists) return { id: sentinel.id, ...sentinel.data() };
-  const data = {
-    fy:        DEFAULT_FY,
-    name:      DEFAULT_FY,
-    createdAt: new Date(),
-    isDefault: true,
-  };
-  await sentinelRef.set(data);
-  return { id: sentinelRef.id, ...data };
+  const existing = await Budget.findOne({ fy: DEFAULT_FY }).lean();
+  if (existing) return toClient(existing);
+  try {
+    const created = await Budget.create({
+      fy: DEFAULT_FY,
+      name: DEFAULT_FY,
+      createdAt: new Date(),
+      isDefault: true,
+    });
+    return toClient(created);
+  } catch (e) {
+    const again = await Budget.findOne({ fy: DEFAULT_FY }).lean();
+    if (again) return toClient(again);
+    throw e;
+  }
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   GET /api/budgets
-═══════════════════════════════════════════════════════════════ */
 router.get('/', async (req, res) => {
   try {
     await seedDefaultIfEmpty();
-    const snap = await db.collection('budgets').orderBy('createdAt', 'asc').get();
-    res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    const rows = await Budget.find().lean();
+    const docs = rows.map(toClient);
+    docs.sort((a, b) => {
+      const ta = new Date(a.createdAt || 0);
+      const tb = new Date(b.createdAt || 0);
+      return ta - tb;
+    });
+    res.json(docs);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ═══════════════════════════════════════════════════════════════
-   GET /api/budgets/:id
-═══════════════════════════════════════════════════════════════ */
 router.get('/:id', async (req, res) => {
   try {
-    const doc = await db.collection('budgets').doc(req.params.id).get();
-    if (!doc.exists) return res.status(404).json({ error: 'Budget not found' });
-    res.json({ id: doc.id, ...doc.data() });
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ error: 'Budget not found' });
+    const doc = await Budget.findById(oid).lean();
+    if (!doc) return res.status(404).json({ error: 'Budget not found' });
+    res.json(toClient(doc));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ═══════════════════════════════════════════════════════════════
-   POST /api/budgets  — create new FY container
-═══════════════════════════════════════════════════════════════ */
 router.post('/', requireRole('Admin', 'Finance'), [
   body('fy').notEmpty().withMessage('FY label is required e.g. FY 27-28'),
 ], async (req, res) => {
@@ -92,64 +80,64 @@ router.post('/', requireRole('Admin', 'Finance'), [
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    // Prevent duplicate FY
-    const existing = await db.collection('budgets')
-      .where('fy', '==', req.body.fy.trim())
-      .limit(1).get();
-    if (!existing.empty)
-      return res.status(409).json({ error: `Budget for ${req.body.fy} already exists` });
+    const fy = req.body.fy.trim();
+    const dup = await Budget.findOne({ fy }).lean();
+    if (dup) return res.status(409).json({ error: `Budget for ${fy} already exists` });
 
     const data = {
-      fy:        req.body.fy.trim(),
-      name:      req.body.fy.trim(),
+      fy,
+      name: fy,
       createdAt: new Date(),
       createdBy: req.user.uid,
       isDefault: false,
     };
-    const ref = await db.collection('budgets').add(data);
-    await audit({ user: req.user, action: 'Create FY', recordId: ref.id, newValue: data });
-    res.status(201).json({ id: ref.id, ...data });
+    const created = await Budget.create(data);
+    await audit({ user: req.user, action: 'Create FY', recordId: String(created._id), newValue: data });
+    res.status(201).json(toClient(created));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ═══════════════════════════════════════════════════════════════
-   PATCH /api/budgets/:id
-═══════════════════════════════════════════════════════════════ */
 router.patch('/:id', requireRole('Admin'), [
   body('fy').optional().notEmpty(),
 ], async (req, res) => {
   try {
-    const ref = db.collection('budgets').doc(req.params.id);
-    const doc = await ref.get();
-    if (!doc.exists) return res.status(404).json({ error: 'Not found' });
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ error: 'Not found' });
+    const doc = await Budget.findById(oid);
+    if (!doc) return res.status(404).json({ error: 'Not found' });
     const updates = { updatedAt: new Date() };
-    if (req.body.fy) { updates.fy = req.body.fy.trim(); updates.name = req.body.fy.trim(); }
-    await ref.update(updates);
-    const updated = await ref.get();
-    res.json({ id: updated.id, ...updated.data() });
+    if (req.body.fy) {
+      updates.fy = req.body.fy.trim();
+      updates.name = req.body.fy.trim();
+    }
+    Object.assign(doc, updates);
+    await doc.save();
+    res.json(toClient(doc));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ═══════════════════════════════════════════════════════════════
-   DELETE /api/budgets/:id  — only if no expenses linked
-═══════════════════════════════════════════════════════════════ */
 router.delete('/:id', requireRole('Admin'), async (req, res) => {
   try {
-    const ref = db.collection('budgets').doc(req.params.id);
-    const doc = await ref.get();
-    if (!doc.exists) return res.status(404).json({ error: 'Not found' });
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ error: 'Not found' });
+    const doc = await Budget.findById(oid);
+    if (!doc) return res.status(404).json({ error: 'Not found' });
 
-    const linked = await db.collection('expenses')
-      .where('budgetId', '==', req.params.id).limit(1).get();
-    if (!linked.empty)
+    const linked = await Expense.findOne({ budgetId: req.params.id }).lean();
+    if (linked) {
       return res.status(400).json({ error: 'Cannot delete: expenses exist under this budget' });
+    }
+    const headLinked = await ExpenseHead.findOne({ budgetId: req.params.id }).lean();
+    if (headLinked) {
+      return res.status(400).json({ error: 'Cannot delete: expense heads exist under this budget' });
+    }
 
-    await ref.delete();
-    await audit({ user: req.user, action: 'Delete FY', recordId: req.params.id, oldValue: doc.data() });
+    await Budget.deleteOne({ _id: oid });
+    await audit({ user: req.user, action: 'Delete FY', recordId: req.params.id, oldValue: toClient(doc) });
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

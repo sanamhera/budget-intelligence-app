@@ -1,131 +1,208 @@
 /**
- * routes/expenseHeads.js
- * Mounted at: /api/expense-heads
- * Firestore collection: expenses
+ * routes/expenseHeads.js  — MongoDB
  */
-
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { db }  = require('../config/firebase');
+const { Budget, ExpenseHead, ExpenseItem, Task, Transaction, AuditLog } = require('../models');
 const { auth, requireRole } = require('../middleware/auth');
-const { buildHierarchy, computeRollup, writeAudit } = require('../services/transactionService');
+const { toClient, parseObjectId } = require('../utils/toClient');
 
 const router = express.Router();
 router.use(auth);
 
-/* GET /api/expense-heads?budgetId= — full nested hierarchy */
+const byCreatedAt = (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
+
+async function safeQuery(Model, field, value) {
+  try {
+    const rows = await Model.find({ [field]: value }).lean();
+    return rows.map(toClient);
+  } catch {
+    return [];
+  }
+}
+
+async function getExecutionStatus(headId, taskIds) {
+  try {
+    const entityIds = [headId, ...taskIds];
+    const allTx = [];
+    for (let i = 0; i < entityIds.length; i += 10) {
+      const chunk = entityIds.slice(i, i + 10);
+      const snap = await Transaction.find({ entityId: { $in: chunk } }).lean();
+      snap.forEach(d => allTx.push(d));
+    }
+    return {
+      nfaApproved: allTx.some(t => t.type === 'NFA' && t.status === 'Approved'),
+      poRaised: allTx.some(t => t.type === 'PO'),
+      invoiced: allTx.some(t => t.type === 'INVOICE'),
+      paid: allTx.some(t => t.type === 'PAYMENT'),
+    };
+  } catch {
+    return { nfaApproved: false, poRaised: false, invoiced: false, paid: false };
+  }
+}
+
 router.get('/', async (req, res) => {
   try {
     const { budgetId } = req.query;
-    if (!budgetId) return res.status(400).json({ error: 'budgetId query param is required' });
-    const budgetDoc = await db.collection('budgets').doc(budgetId).get();
-    if (!budgetDoc.exists) return res.status(404).json({ error: 'Budget not found' });
-    const hierarchy = await buildHierarchy(budgetId);
-    res.json(hierarchy);
-  } catch (e) {
-    console.error('GET /api/expense-heads error:', e);
-    res.status(500).json({ error: e.message });
+    if (!budgetId) {
+      return res.status(400).json({ success: false, error: 'budgetId is required' });
+    }
+    const bOid = parseObjectId(budgetId);
+    if (!bOid) return res.status(404).json({ success: false, error: 'Budget not found' });
+    const budgetDoc = await Budget.findById(bOid).lean();
+    if (!budgetDoc) return res.status(404).json({ success: false, error: 'Budget not found' });
+
+    const [heads, items, tasks] = await Promise.all([
+      safeQuery(ExpenseHead, 'budgetId', budgetId),
+      safeQuery(ExpenseItem, 'budgetId', budgetId),
+      safeQuery(Task, 'budgetId', budgetId),
+    ]);
+
+    heads.sort(byCreatedAt);
+
+    const enriched = await Promise.all(heads.map(async head => {
+      const headItems = items.filter(i => i.expenseHeadId === head.id);
+      const headTasks = tasks.filter(t => t.expenseHeadId === head.id);
+      const taskIds = headTasks.map(t => t.id);
+      const executionStatus = await getExecutionStatus(head.id, taskIds);
+      return {
+        ...head,
+        expenseItemsCount: headItems.length,
+        tasksCount: headTasks.length,
+        executionStatus,
+        expenseItems: headItems.sort(byCreatedAt).map(item => ({
+          ...item,
+          tasks: tasks.filter(t => t.expenseItemId === item.id).sort(byCreatedAt),
+        })),
+        directTasks: headTasks.filter(t => !t.expenseItemId).sort(byCreatedAt),
+      };
+    }));
+
+    return res.status(200).json(enriched);
+  } catch (err) {
+    console.error('[GET /api/expense-heads]', err.message);
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-/* GET /api/expense-heads/:id */
 router.get('/:id', async (req, res) => {
   try {
-    const doc = await db.collection('expenses').doc(req.params.id).get();
-    if (!doc.exists) return res.status(404).json({ error: 'Expense Head not found' });
-    const rollup = await computeRollup(doc.id);
-    res.json({ id: doc.id, ...doc.data(), ...rollup });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ success: false, error: 'Not found' });
+    const doc = await ExpenseHead.findById(oid).lean();
+    if (!doc) return res.status(404).json({ success: false, error: 'Not found' });
+    return res.status(200).json(toClient(doc));
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-/* POST /api/expense-heads */
-router.post('/', requireRole('Admin', 'Finance'), [
-  body('budgetId').notEmpty().withMessage('budgetId is required'),
-  body('name').notEmpty().withMessage('name is required'),
+router.post('/', requireRole('Admin', 'Finance', 'Requestor'), [
+  body('budgetId').notEmpty(),
+  body('name').notEmpty(),
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
-    const budgetDoc = await db.collection('budgets').doc(req.body.budgetId).get();
-    if (!budgetDoc.exists) return res.status(404).json({ error: 'Budget not found' });
+    const bOid = parseObjectId(req.body.budgetId);
+    if (!bOid) return res.status(404).json({ success: false, error: 'Budget not found' });
+    const budgetDoc = await Budget.findById(bOid).lean();
+    if (!budgetDoc) return res.status(404).json({ success: false, error: 'Budget not found' });
+
+    const opexAmount  = Number(req.body.opexAmount)  || 0;
+    const capexAmount = Number(req.body.capexAmount) || 0;
+    const allocated   = opexAmount + capexAmount || Number(req.body.allocated) || 0;
+    const budgetType  = opexAmount > 0 && capexAmount > 0 ? 'Both'
+      : capexAmount > 0 ? 'Capex'
+      : opexAmount > 0  ? 'Opex'
+      : req.body.budgetType || '';
 
     const data = {
-      budgetId:      req.body.budgetId,
-      name:          req.body.name.trim(),
-      allocated:     Number(req.body.allocated)     || 0,
-      spent:         0,
-      remaining:     Number(req.body.allocated)     || 0,
-      status:        'Active',
-      function:      req.body.function              || '',
-      budgetType:    req.body.budgetType            || '',
-      category:      req.body.category              || '',
-      spendCategory: req.body.spendCategory         || '',
-      investmentType:req.body.investmentType        || '',
-      nfaRequired:   req.body.nfaRequired           || 'no',
-      description:   req.body.description           || '',
-      tagIds:        Array.isArray(req.body.tagIds) ? req.body.tagIds : [],
-      fy:            budgetDoc.data().fy,
-      createdAt:     new Date(),
-      createdBy:     req.user.uid,
-      createdByName: req.user.name || req.user.email,
+      budgetId: req.body.budgetId,
+      name: String(req.body.name).trim(),
+      allocated,
+      opexAmount,
+      capexAmount,
+      spent: 0,
+      remaining: allocated,
+      status: 'Active',
+      function: req.body.function || '',
+      budgetType,
+      category: req.body.category || '',
+      spendCategory: req.body.spendCategory || '',
+      investmentType: req.body.investmentType || '',
+      nfaRequired: req.body.nfaRequired || 'no',
+      description: req.body.description || '',
+      tagIds: Array.isArray(req.body.tagIds) ? req.body.tagIds : [],
+      fy: budgetDoc.fy || '',
+      createdAt: new Date(),
+      createdBy: req.user?.uid || '',
+      createdByName: req.user?.name || req.user?.email || '',
     };
 
-    const ref = await db.collection('expenses').add(data);
-    await writeAudit({ user: req.user, module: 'ExpenseHead', action: 'Create', recordId: ref.id, newValue: data });
-    res.status(201).json({ id: ref.id, ...data });
-  } catch (e) {
-    console.error('POST /api/expense-heads error:', e);
-    res.status(500).json({ error: e.message });
+    const ref = await ExpenseHead.create(data);
+    try {
+      await AuditLog.create({
+        user: req.user?.email || 'unknown',
+        module: 'ExpenseHead',
+        action: 'Create',
+        recordId: String(ref._id),
+        timestamp: new Date(),
+      });
+    } catch {}
+    return res.status(201).json({ success: true, id: String(ref._id), ...data });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-/* PATCH /api/expense-heads/:id */
-router.patch('/:id', requireRole('Admin', 'Finance'), async (req, res) => {
+router.patch('/:id', requireRole('Admin', 'Finance', 'Requestor'), async (req, res) => {
   try {
-    const ref = db.collection('expenses').doc(req.params.id);
-    const doc = await ref.get();
-    if (!doc.exists) return res.status(404).json({ error: 'Expense Head not found' });
-
-    const old     = { id: doc.id, ...doc.data() };
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ success: false, error: 'Not found' });
+    const doc = await ExpenseHead.findById(oid);
+    if (!doc) return res.status(404).json({ success: false, error: 'Not found' });
+    const old = doc.toObject();
     const updates = { updatedAt: new Date() };
-    const editableFields = ['name','description','function','budgetType','category','spendCategory','investmentType','nfaRequired','status'];
-    editableFields.forEach(k => { if (req.body[k] != null) updates[k] = req.body[k]; });
-    if (req.body.allocated != null) {
-      updates.allocated = Number(req.body.allocated);
-      updates.remaining = updates.allocated - (old.spent || 0);
-      updates.status    = updates.remaining < 0 ? 'Overrun' : 'Active';
+    ['name', 'description', 'function', 'category', 'spendCategory', 'investmentType', 'nfaRequired', 'status']
+      .forEach(k => { if (req.body[k] != null) updates[k] = req.body[k]; });
+
+    if (req.body.opexAmount != null || req.body.capexAmount != null) {
+      const op  = Number(req.body.opexAmount)  || 0;
+      const cap = Number(req.body.capexAmount) || 0;
+      updates.opexAmount  = op;
+      updates.capexAmount = cap;
+      updates.allocated   = op + cap;
+      updates.budgetType  = op > 0 && cap > 0 ? 'Both' : cap > 0 ? 'Capex' : op > 0 ? 'Opex' : '';
+      updates.remaining   = updates.allocated - (old.spent || 0);
+      updates.status      = updates.remaining < 0 ? 'Overrun' : 'Active';
+    } else {
+      if (req.body.budgetType != null) updates.budgetType = req.body.budgetType;
+      if (req.body.allocated  != null) {
+        updates.allocated = Number(req.body.allocated);
+        updates.remaining = updates.allocated - (old.spent || 0);
+        updates.status    = updates.remaining < 0 ? 'Overrun' : 'Active';
+      }
     }
     if (req.body.tagIds != null) updates.tagIds = Array.isArray(req.body.tagIds) ? req.body.tagIds : [];
-
-    await ref.update(updates);
-    await writeAudit({ user: req.user, module: 'ExpenseHead', action: 'Edit', recordId: req.params.id, oldValue: old, newValue: updates });
-    const updated = await ref.get();
-    const rollup  = await computeRollup(req.params.id);
-    res.json({ id: updated.id, ...updated.data(), ...rollup });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    doc.set(updates);
+    await doc.save();
+    return res.status(200).json({ success: true, ...toClient(doc) });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-/* DELETE /api/expense-heads/:id */
 router.delete('/:id', requireRole('Admin', 'Finance'), async (req, res) => {
   try {
-    const ref = db.collection('expenses').doc(req.params.id);
-    const doc = await ref.get();
-    if (!doc.exists) return res.status(404).json({ error: 'Expense Head not found' });
-    const old = { id: doc.id, ...doc.data() };
-    const [itemSnap, taskSnap] = await Promise.all([
-      db.collection('subExpenses').where('expenseId', '==', req.params.id).limit(1).get(),
-      db.collection('subTasks').where('expenseId',    '==', req.params.id).limit(1).get(),
-    ]);
-    await ref.delete();
-    await writeAudit({ user: req.user, module: 'ExpenseHead', action: 'Delete', recordId: req.params.id, oldValue: old });
-    res.json({ success: true, hadChildren: !itemSnap.empty || !taskSnap.empty });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ success: false, error: 'Not found' });
+    const doc = await ExpenseHead.findByIdAndDelete(oid);
+    if (!doc) return res.status(404).json({ success: false, error: 'Not found' });
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

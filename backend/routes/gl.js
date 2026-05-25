@@ -1,23 +1,15 @@
 const express = require('express');
-const { db } = require('../config/firebase');
+const { GlCode } = require('../models');
 const { auth } = require('../middleware/auth');
+const { toClient } = require('../utils/toClient');
 
 const router = express.Router();
 router.use(auth);
 
-// GET ALL GL CODES
 router.get('/', async (req, res) => {
   try {
-    const snap = await db.collection('glCodes')
-      .where('active', '==', true)
-      .get();
-
-    const list = snap.docs.map(d => ({
-      id: d.id,
-      ...d.data()
-    }));
-
-    res.json(list);
+    const rows = await GlCode.find({ active: true }).lean();
+    res.json(rows.map(toClient));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

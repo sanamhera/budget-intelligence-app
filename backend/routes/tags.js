@@ -1,58 +1,69 @@
 /**
- * routes/tags.js  — FY 2026-27
- * Tag master CRUD + cascade cleanup on delete.
- *
- * Collection: `tags`
- * Schema: { id, name, color, createdAt, createdBy }
- *
- * Routes:
- *   GET    /api/tags          — list all tags
- *   POST   /api/tags          — create tag
- *   PATCH  /api/tags/:id      — edit name / color
- *   DELETE /api/tags/:id      — delete + cascade-remove from all budget docs
+ * routes/tags.js  — MongoDB
  */
-
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { db }  = require('../config/firebase');
+const { Tag, Budget, ExpenseHead, ExpenseItem, Task, AuditLog } = require('../models');
 const { auth, requireRole } = require('../middleware/auth');
+const { toClient, parseObjectId } = require('../utils/toClient');
 
 const router = express.Router();
 router.use(auth);
 
-/* ── Valid color swatches (matches TagManager.jsx palette) ────── */
 const VALID_COLORS = [
-  '#1976d2', '#388e3c', '#f57c00', '#d32f2f', '#7b1fa2',
-  '#0288d1', '#00796b', '#afb42b', '#5d4037', '#455a64',
-  '#c2185b', '#512da8', '#0097a7', '#558b2f', '#e64a19',
+  '#7C3AED', '#DB2777', '#EA580C', '#D97706', '#059669',
+  '#0D9488', '#DC2626', '#9333EA', '#0891B2', '#65A30D',
+  '#92400E', '#C026D3', '#E11D48', '#16A34A', '#475569',
 ];
 
-/* ── audit helper ───────────────────────────────────────────── */
 async function audit({ user, action, recordId, oldValue, newValue }) {
   try {
-    await db.collection('audit').add({
-      user:      user?.name || user?.email || 'Unknown',
-      module:    'Tags',
+    await AuditLog.create({
+      user: user?.name || user?.email || 'Unknown',
+      module: 'Tags',
       action,
-      recordId:  recordId || null,
-      oldValue:  oldValue  != null ? JSON.stringify(oldValue)  : null,
-      newValue:  newValue  != null ? JSON.stringify(newValue)  : null,
+      recordId: recordId || null,
+      oldValue: oldValue != null ? JSON.stringify(oldValue) : null,
+      newValue: newValue != null ? JSON.stringify(newValue) : null,
       timestamp: new Date(),
     });
-  } catch { /* never break main flow */ }
+  } catch {}
 }
 
-/* ── GET all ─────────────────────────────────────────────────── */
 router.get('/', async (req, res) => {
   try {
-    const snap = await db.collection('tags').orderBy('name').get();
-    res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    const rows = await Tag.find().lean();
+    const docs = rows.map(toClient).sort((a, b) => a.name.localeCompare(b.name));
+    res.json(docs);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ── POST create ─────────────────────────────────────────────── */
+router.get('/analytics', async (req, res) => {
+  try {
+    const [tags, heads] = await Promise.all([
+      Tag.find().lean(),
+      ExpenseHead.find().lean(),
+    ]);
+    const result = tags.map(tag => {
+      const tagId = String(tag._id);
+      const tagged = heads.filter(h => (h.tagIds || []).includes(tagId));
+      return {
+        id: tagId,
+        name: tag.name,
+        color: tag.color || '#6366F1',
+        budget: tagged.reduce((s, h) => s + (Number(h.allocated) || 0), 0),
+        spent:  tagged.reduce((s, h) => s + (Number(h.spent)     || 0), 0),
+        headCount: tagged.length,
+      };
+    }).filter(t => t.headCount > 0 || t.budget > 0);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.post('/', [
   body('name').notEmpty().withMessage('Tag name is required').trim(),
   body('color').optional(),
@@ -61,35 +72,28 @@ router.post('/', [
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const name  = req.body.name.trim();
+    const name = req.body.name.trim();
     const color = VALID_COLORS.includes(req.body.color) ? req.body.color : VALID_COLORS[0];
 
-    // Prevent duplicate tag names (case-insensitive)
-    const existing = await db.collection('tags')
-      .where('nameLower', '==', name.toLowerCase())
-      .limit(1)
-      .get();
-    if (!existing.empty) {
-      return res.status(409).json({ error: 'A tag with this name already exists' });
-    }
+    const existing = await Tag.findOne({ nameLower: name.toLowerCase() }).lean();
+    if (existing) return res.status(409).json({ error: 'A tag with this name already exists' });
 
     const data = {
       name,
-      nameLower:  name.toLowerCase(),
+      nameLower: name.toLowerCase(),
       color,
-      createdAt:  new Date(),
-      createdBy:  req.user.uid,
+      createdAt: new Date(),
+      createdBy: req.user.uid,
     };
 
-    const ref = await db.collection('tags').add(data);
-    await audit({ user: req.user, action: 'Create', recordId: ref.id, newValue: data });
-    res.status(201).json({ id: ref.id, ...data });
+    const ref = await Tag.create(data);
+    await audit({ user: req.user, action: 'Create', recordId: String(ref._id), newValue: data });
+    res.status(201).json({ id: String(ref._id), ...data });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ── PATCH update ────────────────────────────────────────────── */
 router.patch('/:id', requireRole('Admin', 'Finance'), [
   body('name').optional().notEmpty().trim(),
   body('color').optional(),
@@ -98,26 +102,21 @@ router.patch('/:id', requireRole('Admin', 'Finance'), [
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const ref = db.collection('tags').doc(req.params.id);
-    const doc = await ref.get();
-    if (!doc.exists) return res.status(404).json({ error: 'Tag not found' });
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ error: 'Tag not found' });
+    const doc = await Tag.findById(oid);
+    if (!doc) return res.status(404).json({ error: 'Tag not found' });
 
-    const old     = { id: doc.id, ...doc.data() };
+    const old = toClient(doc.toObject());
     const updates = { updatedAt: new Date() };
 
     if (req.body.name != null) {
       const name = req.body.name.trim();
-      // Check duplicate only if name is actually changing
       if (name.toLowerCase() !== old.nameLower) {
-        const existing = await db.collection('tags')
-          .where('nameLower', '==', name.toLowerCase())
-          .limit(1)
-          .get();
-        if (!existing.empty) {
-          return res.status(409).json({ error: 'A tag with this name already exists' });
-        }
+        const clash = await Tag.findOne({ nameLower: name.toLowerCase(), _id: { $ne: oid } }).lean();
+        if (clash) return res.status(409).json({ error: 'A tag with this name already exists' });
       }
-      updates.name      = name;
+      updates.name = name;
       updates.nameLower = name.toLowerCase();
     }
 
@@ -125,111 +124,52 @@ router.patch('/:id', requireRole('Admin', 'Finance'), [
       updates.color = VALID_COLORS.includes(req.body.color) ? req.body.color : old.color;
     }
 
-    await ref.update(updates);
+    Object.assign(doc, updates);
+    await doc.save();
     await audit({ user: req.user, action: 'Edit', recordId: req.params.id, oldValue: old, newValue: updates });
-    const updated = await ref.get();
-    res.json({ id: updated.id, ...updated.data() });
+    res.json(toClient(doc));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ── DELETE + cascade ────────────────────────────────────────── */
-/**
- * Cascade strategy:
- *   1. Remove tagId from budgets.tagIds[]           (top-level expense)
- *   2. Remove tagId from budgets.subTasks[].tagIds  (sub-task level)
- *   Firestore batch writes in chunks of 400 (limit is 500).
- */
 router.delete('/:id', requireRole('Admin'), async (req, res) => {
   try {
     const tagId = req.params.id;
-    const ref   = db.collection('tags').doc(tagId);
-    const doc   = await ref.get();
-    if (!doc.exists) return res.status(404).json({ error: 'Tag not found' });
-    const old = { id: doc.id, ...doc.data() };
+    const oid = parseObjectId(tagId);
+    if (!oid) return res.status(404).json({ error: 'Tag not found' });
+    const doc = await Tag.findById(oid);
+    if (!doc) return res.status(404).json({ error: 'Tag not found' });
+    const old = toClient(doc.toObject());
 
-    // Find all budget docs that reference this tag at expense level
-    const budgetsWithTag = await db.collection('budgets')
-      .where('tagIds', 'array-contains', tagId)
-      .get();
+    await Promise.all([
+      Budget.updateMany({ tagIds: tagId }, { $pull: { tagIds: tagId } }),
+      ExpenseHead.updateMany({ tagIds: tagId }, { $pull: { tagIds: tagId } }),
+      ExpenseItem.updateMany({ tagIds: tagId }, { $pull: { tagIds: tagId } }),
+      Task.updateMany({ tagIds: tagId }, { $pull: { tagIds: tagId } }),
+    ]);
 
-    // Firestore FieldValue for array remove
-    const { FieldValue } = require('firebase-admin/firestore');
+    const subBudgets = await Budget.find({
+      isSubProject: true,
+      subTasks: { $exists: true, $ne: [] },
+    }).lean();
 
-    // Process in batches of 400
-    const BATCH_SIZE = 400;
-    let batch = db.batch();
-    let opCount = 0;
-
-    const flushBatch = async () => {
-      if (opCount > 0) {
-        await batch.commit();
-        batch = db.batch();
-        opCount = 0;
-      }
-    };
-
-    for (const budgetDoc of budgetsWithTag.docs) {
-      const budgetRef = db.collection('budgets').doc(budgetDoc.id);
-      const data      = budgetDoc.data();
-
-      // Remove from top-level tagIds
-      batch.update(budgetRef, { tagIds: FieldValue.arrayRemove(tagId) });
-      opCount++;
-
-      // Remove from subTasks[].tagIds if subTasks array exists
-      if (data.subTasks && Array.isArray(data.subTasks)) {
-        const updatedSubTasks = data.subTasks.map(st => ({
-          ...st,
-          tagIds: (st.tagIds || []).filter(t => t !== tagId),
-        }));
-        batch.update(budgetRef, { subTasks: updatedSubTasks });
-        opCount++;
-      }
-
-      if (opCount >= BATCH_SIZE) await flushBatch();
-    }
-
-    // Also scan budgets where tag is only in subTasks (not in top-level tagIds)
-    // These won't be caught by the array-contains query above
-    const allBudgetsWithSubTasks = await db.collection('budgets')
-      .where('isSubProject', '==', true)
-      .get();
-
-    for (const budgetDoc of allBudgetsWithSubTasks.docs) {
-      // Skip if already processed above
-      if (budgetsWithTag.docs.find(d => d.id === budgetDoc.id)) continue;
-
-      const data = budgetDoc.data();
-      if (!data.subTasks || !Array.isArray(data.subTasks)) continue;
-
-      const hasTagInSubTasks = data.subTasks.some(
-        st => (st.tagIds || []).includes(tagId)
-      );
-      if (!hasTagInSubTasks) continue;
-
-      const budgetRef       = db.collection('budgets').doc(budgetDoc.id);
-      const updatedSubTasks = data.subTasks.map(st => ({
-        ...st,
-        tagIds: (st.tagIds || []).filter(t => t !== tagId),
+    for (const b of subBudgets) {
+      const st = b.subTasks;
+      if (!Array.isArray(st)) continue;
+      const has = st.some(s => (s.tagIds || []).includes(tagId));
+      if (!has) continue;
+      const updatedSubTasks = st.map(s => ({
+        ...s,
+        tagIds: (s.tagIds || []).filter(t => t !== tagId),
       }));
-      batch.update(budgetRef, { subTasks: updatedSubTasks });
-      opCount++;
-
-      if (opCount >= BATCH_SIZE) await flushBatch();
+      await Budget.updateOne({ _id: b._id }, { $set: { subTasks: updatedSubTasks } });
     }
 
-    await flushBatch();
-
-    // Finally delete the tag itself
-    await ref.delete();
+    await Tag.deleteOne({ _id: oid });
     await audit({ user: req.user, action: 'Delete', recordId: tagId, oldValue: old });
 
-    res.json({
-      success: true,
-      cascadedBudgets: budgetsWithTag.size,
-    });
+    res.json({ success: true, cascaded: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

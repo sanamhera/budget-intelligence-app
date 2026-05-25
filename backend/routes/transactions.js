@@ -1,51 +1,47 @@
 /**
- * routes/transactions.js
- * Mounted at: /api/transactions
- * All logic delegated to transactionService
+ * routes/transactions.js  — MongoDB
  */
-
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { db }  = require('../config/firebase');
+const { Transaction } = require('../models');
 const { auth, requireRole } = require('../middleware/auth');
+const { toClient, parseObjectId } = require('../utils/toClient');
 const {
   createTransaction,
   updateTransaction,
   deleteTransaction,
-  getTransactionsForEntity,
 } = require('../services/transactionService');
 
 const router = express.Router();
 router.use(auth);
 
-/* GET /api/transactions?entityId=&type= */
 router.get('/', async (req, res) => {
   try {
-    let q = db.collection('transactions').orderBy('createdAt', 'desc');
-    if (req.query.entityId) q = q.where('entityId', '==', req.query.entityId);
-    if (req.query.type)     q = q.where('type',     '==', req.query.type);
-    if (req.query.sourceId) q = q.where('sourceId', '==', req.query.sourceId);
-    const snap = await q.get();
-    res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    const filter = {};
+    if (req.query.entityId) filter.entityId = req.query.entityId;
+    if (req.query.type) filter.type = req.query.type;
+    if (req.query.sourceId) filter.sourceId = req.query.sourceId;
+    const rows = await Transaction.find(filter).sort({ createdAt: -1 }).lean();
+    res.json(rows.map(toClient));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* GET /api/transactions/:id */
 router.get('/:id', async (req, res) => {
   try {
-    const doc = await db.collection('transactions').doc(req.params.id).get();
-    if (!doc.exists) return res.status(404).json({ error: 'Not found' });
-    res.json({ id: doc.id, ...doc.data() });
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ error: 'Not found' });
+    const doc = await Transaction.findById(oid).lean();
+    if (!doc) return res.status(404).json({ error: 'Not found' });
+    res.json(toClient(doc));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/* POST /api/transactions */
 router.post('/', [
-  body('type').isIn(['NFA','PO','INVOICE','PAYMENT']),
+  body('type').isIn(['NFA', 'PO', 'INVOICE', 'PAYMENT']),
   body('entityId').notEmpty(),
 ], async (req, res) => {
   try {
@@ -55,13 +51,11 @@ router.post('/', [
     const tx = await createTransaction({ ...req.body, user: req.user });
     res.status(201).json(tx);
   } catch (e) {
-    // Stage validation errors are user-facing
     const status = e.message.includes('NFA') || e.message.includes('PO') || e.message.includes('invoice') ? 422 : 500;
     res.status(status).json({ error: e.message });
   }
 });
 
-/* PATCH /api/transactions/:id */
 router.patch('/:id', requireRole('Admin', 'Finance', 'Approver', 'Requestor'), async (req, res) => {
   try {
     const tx = await updateTransaction(req.params.id, req.body, req.user);
@@ -71,7 +65,6 @@ router.patch('/:id', requireRole('Admin', 'Finance', 'Approver', 'Requestor'), a
   }
 });
 
-/* DELETE /api/transactions/:id */
 router.delete('/:id', requireRole('Admin'), async (req, res) => {
   try {
     await deleteTransaction(req.params.id, req.user);
@@ -81,6 +74,5 @@ router.delete('/:id', requireRole('Admin'), async (req, res) => {
   }
 });
 
-// Export createTransaction for use by other routes
 module.exports = router;
 module.exports.createTransaction = createTransaction;

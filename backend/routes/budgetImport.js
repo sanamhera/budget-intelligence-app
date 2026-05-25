@@ -23,8 +23,9 @@ const multer  = require('multer');
 const XLSX    = require('xlsx');
 const path    = require('path');
 const fs      = require('fs');
-const { db }  = require('../config/firebase');
+const { Budget, AuditLog, Tag } = require('../models');
 const { auth, requireRole } = require('../middleware/auth');
+const { toClient, parseObjectId } = require('../utils/toClient');
 
 const router = express.Router();
 
@@ -50,7 +51,7 @@ const upload = multer({
 /* ── audit helper ───────────────────────────────────────────── */
 async function audit({ user, action, recordId, newValue }) {
   try {
-    await db.collection('audit').add({
+    await AuditLog.create({
       user:      user?.name || user?.email || 'Unknown',
       module:    'Budget',
       action,
@@ -138,11 +139,12 @@ router.post('/preview', requireRole('Admin', 'Finance'), upload.single('file'), 
       return res.status(400).json({ error: 'No data rows found. Make sure you are using the correct template and have not removed the header row.' });
 
     // Fetch all existing budgets for conflict detection (name-based)
-    const existingSnap = await db.collection('budgets').get();
+    const existingRows = await Budget.find().lean();
     const existingByName = {};
-    existingSnap.docs.forEach(d => {
-      const name = (d.data().name || '').trim().toLowerCase();
-      existingByName[name] = { id: d.id, ...d.data() };
+    existingRows.forEach(d => {
+      const row = toClient(d);
+      const name = (row.name || '').trim().toLowerCase();
+      existingByName[name] = row;
     });
 
     // Process each row
@@ -212,9 +214,10 @@ router.post('/confirm', requireRole('Admin', 'Finance'), async (req, res) => {
     const tagIdMap    = {};
 
     if (allTagNames.length) {
-      const tagSnap = await db.collection('tags').get();
-      tagSnap.docs.forEach(d => {
-        tagIdMap[d.data().name.toLowerCase()] = d.id;
+      const tagRows = await Tag.find().lean();
+      tagRows.forEach(d => {
+        const c = toClient(d);
+        tagIdMap[c.name.toLowerCase()] = c.id;
       });
 
       // Create missing tags
@@ -232,8 +235,8 @@ router.post('/confirm', requireRole('Admin', 'Finance'), async (req, res) => {
             createdAt:  new Date(),
             createdBy:  req.user.uid,
           };
-          const ref = await db.collection('tags').add(data);
-          tagIdMap[name.toLowerCase()] = ref.id;
+          const ref = await Tag.create(data);
+          tagIdMap[name.toLowerCase()] = String(ref._id);
           colorIdx++;
         }
       }
@@ -262,13 +265,10 @@ router.post('/confirm', requireRole('Admin', 'Finance'), async (req, res) => {
         const lcParent = row.parentName.toLowerCase();
         parentProjectId = nameToNewId[lcParent] || null;
 
-        // If not found locally, search Firestore
+        // If not found locally, search database
         if (!parentProjectId) {
-          const pSnap = await db.collection('budgets')
-            .where('name', '==', row.parentName)
-            .limit(1)
-            .get();
-          if (!pSnap.empty) parentProjectId = pSnap.docs[0].id;
+          const pFound = await Budget.findOne({ name: row.parentName }).lean();
+          if (pFound) parentProjectId = String(pFound._id);
         }
         if (parentProjectId) isSubProject = true;
       }
@@ -298,9 +298,9 @@ router.post('/confirm', requireRole('Admin', 'Finance'), async (req, res) => {
         if (row.action === 'create') {
           data.createdAt = new Date();
           data.createdBy = req.user.uid;
-          const ref = await db.collection('budgets').add(data);
-          nameToNewId[row.name.toLowerCase()] = ref.id;
-          await audit({ user: req.user, action: 'Import Create', recordId: ref.id, newValue: { name: data.name, allocated: data.allocated } });
+          const ref = await Budget.create(data);
+          nameToNewId[row.name.toLowerCase()] = String(ref._id);
+          await audit({ user: req.user, action: 'Import Create', recordId: String(ref._id), newValue: { name: data.name, allocated: data.allocated } });
           created++;
         } else if (row.action === 'update' && row.existingId) {
           const updateData = { ...data, updatedAt: new Date() };
@@ -308,10 +308,13 @@ router.post('/confirm', requireRole('Admin', 'Finance'), async (req, res) => {
           delete updateData.spent;
           delete updateData.remaining;
           delete updateData.status;
-          await db.collection('budgets').doc(row.existingId).update(updateData);
-          nameToNewId[row.name.toLowerCase()] = row.existingId;
-          await audit({ user: req.user, action: 'Import Update', recordId: row.existingId, newValue: { name: data.name, allocated: data.allocated } });
-          updated++;
+          const oid = parseObjectId(row.existingId);
+          if (oid) {
+            await Budget.findByIdAndUpdate(oid, { $set: updateData });
+            nameToNewId[row.name.toLowerCase()] = row.existingId;
+            await audit({ user: req.user, action: 'Import Update', recordId: row.existingId, newValue: { name: data.name, allocated: data.allocated } });
+            updated++;
+          }
         }
       } catch (rowErr) {
         errors.push({ name: row.name, error: rowErr.message });

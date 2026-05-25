@@ -1,144 +1,150 @@
 /**
- * routes/tasks.js
- * Mounted at: /api/tasks
- * Firestore collection: subTasks
- *
- * parentType: "expense" | "subExpense"
- * expenseId always set (root Expense Head)
- * subExpenseId set only when parentType === "subExpense"
+ * routes/tasks.js  — MongoDB
  */
-
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { db }  = require('../config/firebase');
+const { ExpenseHead, ExpenseItem, Task, AuditLog } = require('../models');
 const { auth, requireRole } = require('../middleware/auth');
-const { computeRollup, writeAudit } = require('../services/transactionService');
+const { toClient, parseObjectId } = require('../utils/toClient');
 
 const router = express.Router();
 router.use(auth);
 
-/* GET /api/tasks?expenseId= or ?subExpenseId= */
+const byCreatedAt = (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
+
+async function audit(user, action, recordId, data) {
+  try {
+    await AuditLog.create({
+      user: user?.name || user?.email || user?.uid || 'unknown',
+      module: 'Task',
+      action,
+      recordId: recordId || null,
+      newValue: data ? JSON.stringify(data) : null,
+      timestamp: new Date(),
+    });
+  } catch {}
+}
+
 router.get('/', async (req, res) => {
   try {
-    const { expenseId, subExpenseId } = req.query;
-    if (!expenseId && !subExpenseId)
-      return res.status(400).json({ error: 'expenseId or subExpenseId query param required' });
-
-    let q = db.collection('subTasks').orderBy('createdAt', 'asc');
-    if (subExpenseId) q = q.where('subExpenseId', '==', subExpenseId);
-    else              q = q.where('expenseId',    '==', expenseId);
-
-    const snap = await q.get();
-    const rows = await Promise.all(snap.docs.map(async d => {
-      const rollup = await computeRollup(d.id);
-      return { id: d.id, ...d.data(), ...rollup };
-    }));
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    const { expenseHeadId, expenseItemId } = req.query;
+    if (!expenseHeadId && !expenseItemId) {
+      return res.status(400).json({ success: false, error: 'expenseHeadId or expenseItemId required' });
+    }
+    const filter = expenseItemId ? { expenseItemId } : { expenseHeadId };
+    const rows = await Task.find(filter).lean();
+    return res.status(200).json(rows.map(toClient).sort(byCreatedAt));
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-/* GET /api/tasks/:id */
 router.get('/:id', async (req, res) => {
   try {
-    const doc = await db.collection('subTasks').doc(req.params.id).get();
-    if (!doc.exists) return res.status(404).json({ error: 'Task not found' });
-    const rollup = await computeRollup(doc.id);
-    res.json({ id: doc.id, ...doc.data(), ...rollup });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ success: false, error: 'Task not found' });
+    const doc = await Task.findById(oid).lean();
+    if (!doc) return res.status(404).json({ success: false, error: 'Task not found' });
+    return res.status(200).json(toClient(doc));
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-/* POST /api/tasks */
-router.post('/', requireRole('Admin', 'Finance', 'Requestor'), [
-  body('name').notEmpty().withMessage('name is required'),
-  body('expenseId').notEmpty().withMessage('expenseId is required'),
-  body('parentType').isIn(['expense','subExpense']).withMessage('parentType must be expense or subExpense'),
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+router.post('/',
+  requireRole('Admin', 'Finance', 'Requestor'),
+  [
+    body('name').notEmpty().withMessage('name is required'),
+    body('expenseHeadId').notEmpty().withMessage('expenseHeadId is required'),
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
-    const { parentType, expenseId, subExpenseId } = req.body;
+      const { expenseHeadId, expenseItemId } = req.body;
+      const hOid = parseObjectId(expenseHeadId);
+      if (!hOid) {
+        return res.status(404).json({ success: false, error: `Expense Head not found: ${expenseHeadId}` });
+      }
+      const headDoc = await ExpenseHead.findById(hOid);
+      if (!headDoc) {
+        return res.status(404).json({ success: false, error: `Expense Head not found: ${expenseHeadId}` });
+      }
 
-    const expenseDoc = await db.collection('expenses').doc(expenseId).get();
-    if (!expenseDoc.exists) return res.status(404).json({ error: 'Expense Head not found' });
+      if (expenseItemId) {
+        const iOid = parseObjectId(expenseItemId);
+        if (!iOid) {
+          return res.status(404).json({ success: false, error: `Expense Item not found: ${expenseItemId}` });
+        }
+        const itemDoc = await ExpenseItem.findById(iOid);
+        if (!itemDoc) {
+          return res.status(404).json({ success: false, error: `Expense Item not found: ${expenseItemId}` });
+        }
+      }
 
-    let resolvedSubExpenseId = null;
-    if (parentType === 'subExpense') {
-      if (!subExpenseId) return res.status(400).json({ error: 'subExpenseId required when parentType is subExpense' });
-      const seDoc = await db.collection('subExpenses').doc(subExpenseId).get();
-      if (!seDoc.exists) return res.status(404).json({ error: 'Expense Item not found' });
-      resolvedSubExpenseId = subExpenseId;
+      const data = {
+        budgetId: headDoc.budgetId || '',
+        expenseHeadId,
+        expenseItemId: expenseItemId || null,
+        name: String(req.body.name).trim(),
+        allocated: Number(req.body.allocated) || 0,
+        spent: 0,
+        remaining: Number(req.body.allocated) || 0,
+        status: 'Active',
+        nfaRequired: req.body.nfaRequired || 'no',
+        description: req.body.description || '',
+        tagIds: Array.isArray(req.body.tagIds) ? req.body.tagIds : [],
+        createdAt: new Date(),
+        createdBy: req.user?.uid || 'unknown',
+        createdByName: req.user?.name || req.user?.email || 'unknown',
+      };
+
+      const ref = await Task.create(data);
+      await audit(req.user, 'Create', String(ref._id), { name: data.name, expenseHeadId, expenseItemId });
+      return res.status(201).json({ success: true, id: String(ref._id), ...data });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
     }
-
-    const data = {
-      budgetId:      expenseDoc.data().budgetId,
-      expenseId,
-      subExpenseId:  resolvedSubExpenseId,
-      parentType,
-      name:          req.body.name.trim(),
-      allocated:     Number(req.body.allocated) || 0,
-      spent:         0,
-      remaining:     Number(req.body.allocated) || 0,
-      status:        'Active',
-      nfaRequired:   req.body.nfaRequired || 'no',
-      description:   req.body.description || '',
-      tagIds:        Array.isArray(req.body.tagIds) ? req.body.tagIds : [],
-      createdAt:     new Date(),
-      createdBy:     req.user.uid,
-      createdByName: req.user.name || req.user.email,
-    };
-
-    const ref = await db.collection('subTasks').add(data);
-    await writeAudit({ user: req.user, module: 'Task', action: 'Create', recordId: ref.id, newValue: data });
-    res.status(201).json({ id: ref.id, ...data });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
   }
-});
+);
 
-/* PATCH /api/tasks/:id */
 router.patch('/:id', requireRole('Admin', 'Finance', 'Requestor'), async (req, res) => {
   try {
-    const ref = db.collection('subTasks').doc(req.params.id);
-    const doc = await ref.get();
-    if (!doc.exists) return res.status(404).json({ error: 'Task not found' });
-
-    const old     = { id: doc.id, ...doc.data() };
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ success: false, error: 'Task not found' });
+    const doc = await Task.findById(oid);
+    if (!doc) return res.status(404).json({ success: false, error: 'Task not found' });
+    const old = doc.toObject();
     const updates = { updatedAt: new Date() };
-    ['name','description','nfaRequired','status'].forEach(k => { if (req.body[k] != null) updates[k] = req.body[k]; });
+    ['name', 'description', 'nfaRequired', 'status'].forEach(k => {
+      if (req.body[k] != null) updates[k] = req.body[k];
+    });
     if (req.body.allocated != null) {
       updates.allocated = Number(req.body.allocated);
       updates.remaining = updates.allocated - (old.spent || 0);
-      updates.status    = updates.remaining < 0 ? 'Overrun' : 'Active';
+      updates.status = updates.remaining < 0 ? 'Overrun' : 'Active';
     }
     if (req.body.tagIds != null) updates.tagIds = Array.isArray(req.body.tagIds) ? req.body.tagIds : [];
-
-    await ref.update(updates);
-    await writeAudit({ user: req.user, module: 'Task', action: 'Edit', recordId: req.params.id, oldValue: old, newValue: updates });
-    const updated = await ref.get();
-    const rollup  = await computeRollup(req.params.id);
-    res.json({ id: updated.id, ...updated.data(), ...rollup });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    Object.assign(doc, updates);
+    await doc.save();
+    await audit(req.user, 'Edit', req.params.id, updates);
+    return res.status(200).json({ success: true, ...toClient(doc) });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-/* DELETE /api/tasks/:id */
 router.delete('/:id', requireRole('Admin', 'Finance'), async (req, res) => {
   try {
-    const ref = db.collection('subTasks').doc(req.params.id);
-    const doc = await ref.get();
-    if (!doc.exists) return res.status(404).json({ error: 'Task not found' });
-    const old = { id: doc.id, ...doc.data() };
-    await ref.delete();
-    await writeAudit({ user: req.user, module: 'Task', action: 'Delete', recordId: req.params.id, oldValue: old });
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    const oid = parseObjectId(req.params.id);
+    if (!oid) return res.status(404).json({ success: false, error: 'Task not found' });
+    const doc = await Task.findByIdAndDelete(oid);
+    if (!doc) return res.status(404).json({ success: false, error: 'Task not found' });
+    await audit(req.user, 'Delete', req.params.id, null);
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

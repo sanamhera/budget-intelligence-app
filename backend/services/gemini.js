@@ -1,20 +1,18 @@
-require('dotenv').config();
 const { GoogleGenAI } = require("@google/genai");
-console.log("Checking API Key:", process.env.GEMINI_API_KEY ? "Key Found!" : "Key NOT Found");
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-});
+
+let _ai = null;
+function getAI() {
+  if (!_ai && process.env.GEMINI_API_KEY) {
+    _ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  }
+  return _ai;
+}
 
 async function parseInvoicePDF(pdfBuffer, glList = []) {
-
-  console.log("------ INVOICE PARSE START ------");
-
-  if (!process.env.GEMINI_API_KEY) {
-    return emptyResponse();
-  }
+  const ai = getAI();
+  if (!ai) return emptyResponse();
 
   try {
-
     const base64PDF = pdfBuffer.toString("base64");
 
     const glOptions = glList
@@ -95,8 +93,123 @@ Rules:
   }
 }
 
-function emptyResponse() {
+async function parseNFAPDF(pdfBuffer) {
+  const ai = getAI();
+  if (!ai) return emptyNFAResponse();
 
+  try {
+    const base64PDF = pdfBuffer.toString("base64");
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [
+        {
+          inlineData: { mimeType: "application/pdf", data: base64PDF },
+        },
+        {
+          text: `You are a finance document parser specialising in NFA (Note for Approval) documents.
+
+Read the document carefully and extract the following fields from the exact sections specified.
+
+Return ONLY valid JSON with these fields:
+- nfaNumber: taken from the "Request No" field at the top of the document (string)
+- title: taken from the "Subject" field (string)
+- description: taken from the "Description" field (string, preserve the full text)
+- amount: taken from the "Financial Impact" field — extract the numeric value only, no currency symbols (number)
+- vendorName: vendor or supplier name if mentioned anywhere in the document (string, empty string if not found)
+- date: document date in YYYY-MM-DD format (string, empty string if not found)
+
+Rules:
+• Return valid JSON only — no markdown, no explanation
+• Map fields strictly to the sections named above — do not infer from other sections
+• If a field is not found leave it as empty string or 0
+• amount must be a number (not a string)`,
+        },
+      ],
+    });
+
+    const raw = response.text;
+    console.log("RAW GEMINI NFA RESPONSE:", raw);
+
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON returned");
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      nfaNumber:   parsed.nfaNumber   || "",
+      title:       parsed.title       || "",
+      description: parsed.description || "",
+      amount:      Number(parsed.amount) || 0,
+      vendorName:  parsed.vendorName  || "",
+      date:        parsed.date        || "",
+    };
+  } catch (err) {
+    console.error("GEMINI NFA ERROR:", err);
+    return emptyNFAResponse();
+  }
+}
+
+async function parsePOPDF(pdfBuffer) {
+  const ai = getAI();
+  if (!ai) return emptyPOResponse();
+
+  try {
+    const base64PDF = pdfBuffer.toString("base64");
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [
+        {
+          inlineData: { mimeType: "application/pdf", data: base64PDF },
+        },
+        {
+          text: `You are a finance document parser specialising in Purchase Order (PO) documents.
+
+Read the document carefully and extract the following fields.
+
+Return ONLY valid JSON with these fields:
+- poNumber: the PO number or reference number (string)
+- vendorName: vendor or supplier name (string)
+- amount: total PO value in numbers only, no currency symbols (number)
+- description: scope of work or goods/services description (string, max 3 sentences)
+- date: PO date in YYYY-MM-DD format (string, empty string if not found)
+- lineItems: array of line items, each with:
+    - description (string)
+    - quantity (number, 0 if not stated)
+    - unitPrice (number, 0 if not stated)
+    - amount (number)
+
+Rules:
+• Return valid JSON only — no markdown, no explanation
+• If a field is not found leave it as empty string or 0
+• amount fields must be numbers (not strings)
+• lineItems may be an empty array if no line items are found`,
+        },
+      ],
+    });
+
+    const raw = response.text;
+    console.log("RAW GEMINI PO RESPONSE:", raw);
+
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON returned");
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      poNumber:    parsed.poNumber    || "",
+      vendorName:  parsed.vendorName  || "",
+      amount:      Number(parsed.amount) || 0,
+      description: parsed.description || "",
+      date:        parsed.date        || "",
+      lineItems:   Array.isArray(parsed.lineItems) ? parsed.lineItems : [],
+    };
+  } catch (err) {
+    console.error("GEMINI PO ERROR:", err);
+    return emptyPOResponse();
+  }
+}
+
+function emptyResponse() {
   return {
     vendorName: "",
     invoiceNumber: "",
@@ -106,9 +219,18 @@ function emptyResponse() {
     dueDate: "",
     lineItems: []
   };
+}
 
+function emptyNFAResponse() {
+  return { nfaNumber: "", title: "", description: "", amount: 0, vendorName: "", date: "" };
+}
+
+function emptyPOResponse() {
+  return { poNumber: "", vendorName: "", amount: 0, description: "", date: "", lineItems: [] };
 }
 
 module.exports = {
-  parseInvoicePDF
+  parseInvoicePDF,
+  parseNFAPDF,
+  parsePOPDF,
 };

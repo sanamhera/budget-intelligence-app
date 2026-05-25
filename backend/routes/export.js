@@ -7,7 +7,8 @@
  */
 const express = require('express');
 const ExcelJS = require('exceljs');
-const { db }  = require('../config/firebase');
+const { Budget, Invoice } = require('../models');
+const { toClient } = require('../utils/toClient');
 const { auth } = require('../middleware/auth');
 
 const router = express.Router();
@@ -17,13 +18,14 @@ const FY = 'FY 2026-27';
 
 /* ── helper: fetch all budgets + invoices ───────────────────── */
 async function getData() {
-  const [budgetSnap, invoiceSnap] = await Promise.all([
-    db.collection('budgets').orderBy('createdAt', 'desc').get(),
-    db.collection('invoices').orderBy('createdAt', 'desc').get(),
+  const [budgetRows, invoiceRows] = await Promise.all([
+    Budget.find().sort({ createdAt: -1 }).lean(),
+    Invoice.find().sort({ createdAt: -1 }).lean(),
   ]);
-  const budgets  = budgetSnap.docs.map(d  => ({ id: d.id,  ...d.data()  }));
-  const invoices = invoiceSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-  return { budgets, invoices };
+  return {
+    budgets: budgetRows.map(toClient),
+    invoices: invoiceRows.map(toClient),
+  };
 }
 
 /* ── helper: style header row ───────────────────────────────── */

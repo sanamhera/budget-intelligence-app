@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
-const { db } = require('../config/firebase');
+const { User } = require('../models');
+const { toClient } = require('../utils/toClient');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 
@@ -8,9 +9,15 @@ const auth = async (req, res, next) => {
     const token = req.headers.authorization?.replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
     const decoded = jwt.verify(token, JWT_SECRET);
-    const userSnap = await db.collection('users').doc(decoded.uid).get();
-    if (!userSnap.exists) return res.status(401).json({ error: 'User not found' });
-    req.user = { uid: decoded.uid, ...userSnap.data() };
+    const userDoc = await User.findById(decoded.uid).lean();
+    if (!userDoc) return res.status(401).json({ error: 'User not found' });
+    const u = toClient(userDoc);
+    req.user = {
+      uid: u.id,
+      email: u.email,
+      name: u.name,
+      role: u.role,
+    };
     next();
   } catch (e) {
     res.status(401).json({ error: 'Invalid token' });
