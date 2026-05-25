@@ -2,7 +2,7 @@
    shared.js dependency removed — all tokens inlined.
 */
 import { useEffect, useState, useRef } from "react";
-import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from "recharts";
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell } from "recharts";
 
 const FY  = "FY 2026-27";
 const tkn = () => localStorage.getItem("token") || "";
@@ -260,11 +260,11 @@ function KPICards({ stats }) {
   const pct = totalBudget>0?((totalSpent/totalBudget)*100).toFixed(1):0;
   const mo  = new Date().getMonth()+1;
   const cards = [
-    { icon:"📋", label:"Total Budget",  value:fmtK(totalBudget), sub:"Approved allocation",    accent:"#4F6EF7" },
-    { icon:"💸", label:"Total Spent",   value:fmtK(totalSpent),  sub:`${pct}% utilised`,       accent:"#8B5CF6" },
-    { icon:"🔥", label:"Avg Burn / Mo", value:fmtK(burnRate),    sub:`Across ${mo} months`,    accent:"#F43F6E" },
-    { icon:"🏢", label:"Opex Budget",   value:opexBudget>0?fmtK(opexBudget):"₹0", sub:"Operating expenditure", accent:"#4F6EF7" },
-    { icon:"🏗",  label:"Capex Budget", value:capexBudget>0?fmtK(capexBudget):"₹0", sub:"Capital expenditure",  accent:"#0EA5A0" },
+    { icon:"🏗",  label:"Capex Budget",  value:fmtK(capexBudget), sub:"Capital expenditure",   accent:"#7C3AED" },
+    { icon:"🏢", label:"Opex Budget",    value:fmtK(opexBudget),  sub:"Operating expenditure", accent:"#4F6EF7" },
+    { icon:"📋", label:"Total Budget",   value:fmtK(totalBudget), sub:"Approved allocation",   accent:"#10B981" },
+    { icon:"💸", label:"Total Spent",    value:fmtK(totalSpent),  sub:`${pct}% utilised`,      accent:"#F59E0B" },
+    { icon:"🔥", label:"Avg Burn / Mo",  value:fmtK(burnRate),    sub:`Across ${mo} months`,   accent:"#F43F6E" },
   ];
   return (
     <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:12, marginBottom:14 }}>
@@ -309,14 +309,48 @@ function StageRow({ stages }) {
     </div>
   );
 }
-function buildStages(s={}) {
+function buildStages(s = {}) {
+  const nfaRequired = s.nfaRequired === "yes" || s.nfaRequired === true;
+
   return [
-    { label:"Budget",       status:"done" },
-    { label:"NFA Raised",   status:s.nfaRaised?"done":"pending" },
-    { label:"NFA Approved", status:s.nfaApproved?"done":s.nfaRaised?"pending":"none" },
-    { label:"Vendor",       status:s.vendor?"done":"none" },
-    { label:"Invoice",      status:s.invoice?"done":"none" },
-    { label:"Payment",      status:s.payment?"done":s.paymentPartial?"pending":"none" },
+    { label: "Budget", status: "done" },
+
+    {
+      label: "NFA Required",
+      status: nfaRequired ? "done" : "skipped"
+    },
+
+    {
+      label: "NFA Approved",
+      status: !nfaRequired
+        ? "skipped"
+        : s.nfaApproved
+        ? "done"
+        : "pending"
+    },
+
+    {
+      label: "PO Raised",
+      status: nfaRequired
+        ? s.nfaApproved
+          ? (s.po ? "done" : "pending")
+          : "none"
+        : (s.po ? "done" : "pending")
+    },
+
+    {
+      label: "Invoice",
+      status: s.po
+        ? (s.invoice ? "done" : "pending")
+        : "none"
+    },
+
+    {
+      label: "Payment",
+      status: s.invoice
+        ? (s.payment ? "done" : "pending")
+        : "none"
+    }
   ];
 }
 function ProjRow({ project }) {
@@ -376,7 +410,7 @@ function ProcurementFlow({ projects }) {
     <div style={{ background:"#fff", border:"1px solid #E8ECF4", borderRadius:14, overflow:"hidden", boxShadow:"0 1px 4px rgba(0,0,0,0.04)" }}>
       <div style={{ padding:"16px 20px 12px", borderBottom:"1px solid #E8ECF4" }}>
         <div style={{ fontSize:15, fontWeight:800, color:"#1A2035", fontFamily:"'Plus Jakarta Sans',sans-serif", marginBottom:2 }}>Project Lifecycle</div>
-        <div style={{ fontSize:11, color:"#8C96B0", fontFamily:"'DM Sans',sans-serif", marginBottom:12 }}>Budget → NFA Raised → NFA Approved → Vendor → Invoice → Payment</div>
+        <div style={{ fontSize:11, color:"#8C96B0", fontFamily:"'DM Sans',sans-serif", marginBottom:12 }}>NFA Required → NFA Approved → PO → Invoice → Payment</div>
         <div style={{ display:"flex", gap:16, marginBottom:12 }}>
           {[["#10B981","Completed"],["#F59E0B","Pending"],["#D1D5DB","Not Started"]].map(([dot,lbl]) => (
             <div key={lbl} style={{ display:"flex",alignItems:"center",gap:5 }}>
@@ -523,6 +557,87 @@ function RunVsChangeChart({ analytics }) {
   );
 }
 
+/* ── Tag Analytics ───────────────────────────────────────────── */
+const TAG_CHIP_PALETTE = ['#7C3AED','#DB2777','#EA580C','#D97706','#059669','#0D9488','#DC2626','#9333EA','#0891B2','#65A30D'];
+const tagDisplayColor = (name = '') => {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (Math.imul(31, h) + name.charCodeAt(i)) | 0;
+  return TAG_CHIP_PALETTE[Math.abs(h) % TAG_CHIP_PALETTE.length];
+};
+
+function TagAnalytics() {
+  const [data, setData]       = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/tags/analytics", { headers: hdr() })
+      .then(r => r.ok ? r.json() : [])
+      .then(d => { setData(Array.isArray(d) ? d : []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  if (loading || data.length === 0) return null;
+
+  const chartData = data.map(t => ({
+    name: t.name.length > 11 ? t.name.slice(0, 11) + "…" : t.name,
+    Budget: t.budget,
+    Spent:  t.spent,
+    color:  tagDisplayColor(t.name),
+  }));
+
+  return (
+    <div style={{ background:"#fff", border:"1px solid #E8ECF4", borderRadius:14, padding:"18px 20px", boxShadow:"0 1px 4px rgba(0,0,0,0.04)", marginBottom:14 }}>
+      <SLabel color="#8B5CF6">Tag Analytics — Budget & Spend</SLabel>
+      <div style={{ display:"grid", gridTemplateColumns:"minmax(0,1.4fr) minmax(0,1fr)", gap:24, alignItems:"start" }}>
+        <ResponsiveContainer width="100%" height={190}>
+          <BarChart data={chartData} barCategoryGap="30%">
+            <CartesianGrid strokeDasharray="3 3" stroke="#E8ECF4" vertical={false}/>
+            <XAxis dataKey="name" tick={{ fontSize:9, fill:"#8C96B0", fontFamily:"'DM Sans',sans-serif" }} axisLine={false} tickLine={false}/>
+            <YAxis tickFormatter={v=>fmtK(v)} tick={{ fontSize:9, fill:"#8C96B0", fontFamily:"'DM Sans',sans-serif" }} axisLine={false} tickLine={false} width={52}/>
+            <Tooltip formatter={v=>fmtK(v)} contentStyle={{ borderRadius:10, border:"1px solid #E8ECF4", fontSize:11 }}/>
+            <Bar dataKey="Budget" radius={[4,4,0,0]} opacity={0.85}>
+              {chartData.map((e,i) => <Cell key={i} fill={e.color}/>)}
+            </Bar>
+            <Bar dataKey="Spent" radius={[4,4,0,0]} opacity={0.45}>
+              {chartData.map((e,i) => <Cell key={i} fill={e.color}/>)}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr><TH>Tag</TH><TH right>Budget</TH><TH right>Spent</TH><TH right>Used%</TH><TH right>Heads</TH></tr>
+          </thead>
+          <tbody>
+            {data.map(t => {
+              const used = t.budget > 0 ? Math.round((t.spent / t.budget) * 100) : 0;
+              const usedColor = used > 100 ? "#EF4444" : used >= 80 ? "#F59E0B" : "#10B981";
+              return (
+                <tr key={t.id}
+                  onMouseEnter={e=>e.currentTarget.style.background="#F7F9FF"}
+                  onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+                  style={{ transition:"background 0.12s" }}>
+                  <td style={{ padding:"7px 16px", borderBottom:"1px solid #E8ECF4" }}>
+                    {(() => { const c = tagDisplayColor(t.name); return (
+                      <span style={{ display:"inline-flex", alignItems:"center", height:18, padding:"0 8px", borderRadius:20, background:`${c}1A`, border:`1px solid ${c}40`, fontSize:10, fontWeight:600, color:c, fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap" }}>
+                        {t.name}
+                      </span>
+                    ); })()}
+                  </td>
+                  <TD right>{fmtK(t.budget)}</TD>
+                  <TD right>{fmtK(t.spent)}</TD>
+                  <TD right bold color={usedColor}>{used}%</TD>
+                  <TD right>{t.headCount}</TD>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 /* ══════════════════════════════════════════════════════════════
    MAIN
 ══════════════════════════════════════════════════════════════ */
@@ -560,6 +675,7 @@ export default function Dashboard() {
       <AIInsightStrip stats={stats} aiSummary={aiSummary} />
       <KPICards stats={stats} />
       <RunVsChangeChart analytics={analytics} />
+      <TagAnalytics />
 
       {/* BU CHART + ASK AI */}
       <div style={{ display:"grid", gridTemplateColumns:"minmax(0,1.6fr) minmax(0,1fr)", gap:14, marginBottom:14 }}>

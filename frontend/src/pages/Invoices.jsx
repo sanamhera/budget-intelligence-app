@@ -1,181 +1,168 @@
 /**
- * pages/Invoices.jsx — FY 2026-27
- *
- * Changes from previous version:
- *  ✦ Cost Centre column added to table (optional, user-filled, not compulsory)
- *  ✦ Cost Centre field added to Add Invoice dialog
- *  ✦ Cost Centre field added to Edit Invoice dialog
- *  ✦ costCentre included in create payload, edit payload, and reset
+ * pages/Invoices.jsx — Zero MUI
+ * Invoice links to Expense Head, optionally NFA and PO
+ * PDF upload + AI parse (Gemini via backend) + manual create
+ * Vendor autocomplete with auto-create
  */
-import { useState, useEffect } from "react";
-import {
-  Box, Button, Card, Table, TableBody, TableCell, TableHead, TableRow,
-  Typography, Dialog, DialogTitle, DialogContent, DialogActions,
-  TextField, Chip, CircularProgress, FormControl, InputLabel, Select,
-  MenuItem, IconButton, Tooltip, Alert, Autocomplete,
-} from "@mui/material";
-import AddIcon       from "@mui/icons-material/Add";
-import UploadIcon    from "@mui/icons-material/Upload";
-import EditIcon      from "@mui/icons-material/Edit";
-import DeleteIcon    from "@mui/icons-material/Delete";
-import DownloadIcon  from "@mui/icons-material/Download";
-import FolderZipIcon from "@mui/icons-material/FolderZip";
-import { api, auditLog } from "../api/client";
-import { useAuth }        from "../context/AuthContext";
+import { useState, useEffect, useRef } from 'react';
+import { api, auditLog } from '../api/client';
+import { useAuth } from '../context/AuthContext';
+import './app.css';
 
-const FY  = "FY 2026-27";
-const fmt = v => `₹${Number(v || 0).toLocaleString("en-IN")}`;
-const tkn = () => localStorage.getItem("token") || "";
+const FY  = 'FY 2026-27';
+const fmt = v => `₹${Number(v||0).toLocaleString('en-IN')}`;
+const tkn = () => localStorage.getItem('token') || '';
 const h   = () => ({ Authorization: `Bearer ${tkn()}` });
-const hj  = () => ({ ...h(), "Content-Type": "application/json" });
+const hj  = () => ({ ...h(), 'Content-Type': 'application/json' });
 
-/* ── Auto-create vendor by name ─────────────────────────────── */
-async function ensureVendor(name, extras = {}) {
+async function ensureVendor(name, extras={}) {
   if (!name?.trim()) return null;
-  const r    = await fetch("/api/vendors/auto-create", { method: "POST", headers: hj(), body: JSON.stringify({ name: name.trim(), ...extras }) });
+  const r = await fetch('/api/vendors/auto-create', { method:'POST', headers: hj(), body: JSON.stringify({ name: name.trim(), ...extras }) });
   const json = await r.json();
   return r.ok ? json : null;
 }
 
-/* ── Vendor Autocomplete (shared between Add and Edit) ───────── */
+function Modal({ open, onClose, title, children, footer, large }) {
+  if (!open) return null;
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className={`modal${large?' modal-lg':''}`} onClick={e=>e.stopPropagation()}>
+        <div className="modal-header"><h2 className="modal-title">{title}</h2><button className="btn-icon" onClick={onClose}>✕</button></div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-footer">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
 function VendorAutocomplete({ vendors, value, onChange, onNameChange }) {
-  const selected = vendors.find(v => v.id === value) || null;
-  return (
-    <Autocomplete
-      options={vendors}
-      getOptionLabel={v => `${v.vendorCode ? v.vendorCode + " — " : ""}${v.name}`}
-      value={selected}
-      freeSolo
-      onChange={(_, newVal) => {
-        if (!newVal)                      { onChange("", ""); return; }
-        if (typeof newVal === "string")   { onChange("", newVal); onNameChange?.(newVal); return; }
-        onChange(newVal.id, newVal.name);
-      }}
-      onInputChange={(_, val, reason) => {
-        if (reason === "input") onNameChange?.(val);
-      }}
-      renderInput={(params) => (
-        <TextField
-          {...params}
-          label="Vendor (select or type new)"
-          margin="normal"
-          fullWidth
-          helperText={!value ? "If vendor doesn't exist, type name → will be auto-created on save" : ""}
-        />
-      )}
-      renderOption={(props, v) => (
-        <li {...props} key={v.id}>
-          <span style={{ fontFamily: "monospace", fontSize: 11, color: "#0EA5A0", marginRight: 8 }}>{v.vendorCode}</span>
-          {v.name}
-        </li>
-      )}
-    />
-  );
-}
-
-/* ── Confirm Delete ─────────────────────────────────────────── */
-function ConfirmDelete({ open, name, onConfirm, onClose }) {
-  return (
-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
-      <DialogTitle>Delete Invoice</DialogTitle>
-      <DialogContent><Typography>Delete invoice <b>#{name}</b>? Cannot be undone.</Typography></DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" color="error" onClick={onConfirm}>Delete</Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
-
-/* ── Edit Dialog ────────────────────────────────────────────── */
-function EditDialog({ open, invoice, glList, budgets, vendors, onSave, onClose }) {
-  const [form,      setForm]      = useState({});
-  const [vendorId,  setVendorId]  = useState("");
-  const [vendorRaw, setVendorRaw] = useState("");
+  const [inputVal, setInputVal] = useState('');
+  const [showList, setShowList] = useState(false);
+  const wrapRef = useRef(null);
 
   useEffect(() => {
-    if (invoice) {
-      setForm({ ...invoice });
-      setVendorId(invoice.vendorId || "");
-      setVendorRaw(invoice.vendorName || "");
-    }
-  }, [invoice]);
+    if (value) { const v = vendors.find(v=>v.id===value); if (v) setInputVal(v.vendorCode?`${v.vendorCode} — ${v.name}`:v.name); }
+    else if (!inputVal) setInputVal('');
+  }, [value, vendors]);
 
-  const f = k => ({ value: form[k] || "", onChange: e => setForm(p => ({ ...p, [k]: e.target.value })) });
+  useEffect(() => {
+    const handle = e => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setShowList(false); };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, []);
 
-  const handleSave = async () => {
-    let vId = vendorId, vName = vendorRaw;
-    if (!vId && vName.trim()) {
-      const v = await ensureVendor(vName);
-      if (v) { vId = v.id; vName = v.name; }
-    } else if (vId) {
-      vName = vendors.find(v => v.id === vId)?.name || vName;
-    }
-    onSave({ ...form, vendorId: vId, vendorName: vName });
-  };
+  const filtered = vendors.filter(v => !inputVal || v.name.toLowerCase().includes(inputVal.toLowerCase()) || (v.vendorCode||'').toLowerCase().includes(inputVal.toLowerCase())).slice(0,10);
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Edit Invoice — {form.invoiceNumber || form.id}</DialogTitle>
-      <DialogContent>
-        <FormControl fullWidth margin="normal">
-          <InputLabel>Project</InputLabel>
-          <Select value={form.budgetId || ""} label="Project"
-            onChange={e => setForm(p => ({ ...p, budgetId: e.target.value }))}>
-            {budgets.map(b => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
-          </Select>
-        </FormControl>
-        <VendorAutocomplete
-          vendors={vendors}
-          value={vendorId}
-          onChange={(id, name) => { setVendorId(id); setVendorRaw(name); }}
-          onNameChange={setVendorRaw}
-        />
-        <TextField fullWidth label="Invoice Number" margin="normal" {...f("invoiceNumber")} />
-        <TextField fullWidth type="number" label="Amount (₹)" margin="normal"
-          value={form.amount || ""} onChange={e => setForm(p => ({ ...p, amount: parseFloat(e.target.value) }))} />
-        <TextField fullWidth type="number" label="Tax (₹)" margin="normal"
-          value={form.tax || ""} onChange={e => setForm(p => ({ ...p, tax: parseFloat(e.target.value) }))} />
-        <TextField fullWidth type="date" label="Date" InputLabelProps={{ shrink: true }}
-          margin="normal" {...f("date")} />
-        <TextField fullWidth type="date" label="Due Date" InputLabelProps={{ shrink: true }}
-          margin="normal" {...f("dueDate")} />
-        {/* ── Cost Centre (optional) ── */}
-        <TextField fullWidth label="Cost Centre" margin="normal"
-          value={form.costCentre || ""}
-          onChange={e => setForm(p => ({ ...p, costCentre: e.target.value }))}
-          placeholder="e.g. CC-IT-001  (optional)"
-        />
-        {glList.length > 0 && (
-          <FormControl fullWidth margin="normal">
-            <InputLabel>GL Code</InputLabel>
-            <Select value={form.glCode || ""} label="GL Code"
-              onChange={e => setForm(p => ({ ...p, glCode: e.target.value }))}>
-              {glList.map(gl => <MenuItem key={gl.code} value={gl.code}>{gl.code} — {gl.name}</MenuItem>)}
-            </Select>
-          </FormControl>
-        )}
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={handleSave}>Save Changes</Button>
-      </DialogActions>
-    </Dialog>
+    <div className="field" ref={wrapRef} style={{position:'relative'}}>
+      <label>Vendor (select or type new)</label>
+      <input value={inputVal}
+        onChange={e=>{ setInputVal(e.target.value); onNameChange?.(e.target.value); onChange('',e.target.value); setShowList(true); }}
+        onFocus={()=>setShowList(true)}
+        placeholder="Type vendor name or code…" />
+      {showList && filtered.length > 0 && (
+        <div style={{position:'absolute',top:'100%',left:0,right:0,zIndex:200,background:'#fff',border:'1px solid #E2E8F0',borderRadius:8,boxShadow:'0 4px 16px rgba(0,0,0,0.1)',maxHeight:220,overflowY:'auto'}}>
+          {filtered.map(v=>(
+            <div key={v.id}
+              onClick={()=>{ const l=v.vendorCode?`${v.vendorCode} — ${v.name}`:v.name; setInputVal(l); onChange(v.id,v.name); onNameChange?.(v.name); setShowList(false); }}
+              style={{padding:'8px 12px',cursor:'pointer',fontSize:13,borderBottom:'1px solid #F1F5F9'}}
+              onMouseEnter={e=>e.currentTarget.style.background='#F8FAFF'}
+              onMouseLeave={e=>e.currentTarget.style.background='#fff'}>
+              {v.vendorCode && <span style={{fontFamily:'monospace',fontSize:11,color:'#0EA5A0',marginRight:8}}>{v.vendorCode}</span>}
+              {v.name}
+            </div>
+          ))}
+        </div>
+      )}
+      {!value && inputVal && <div style={{fontSize:11,color:'#94A3B8',marginTop:3}}>Vendor not in master — will be auto-created on save</div>}
+    </div>
   );
 }
 
-/* ══════════════════════════════════════════════════════════════
-   MAIN PAGE
-══════════════════════════════════════════════════════════════ */
-export default function Invoices() {
-  const [invoices,   setInvoices]   = useState([]);
-  const [budgets,    setBudgets]    = useState([]);
-  const [glList,     setGlList]     = useState([]);
-  const [vendors,    setVendors]    = useState([]);
-  const [loading,    setLoading]    = useState(true);
-  const [error,      setError]      = useState("");
+/* ── Linked entity selectors (for Add/Edit) ──────────────── */
+function LinkedSelectors({ expenseHeadId, setExpenseHeadId, expenseItemId, setExpenseItemId, taskId, setTaskId, nfaId, setNfaId, poId, setPoId, expenseHeads }) {
+  const [items, setItems] = useState([]);
+  const [tasks, setTasks] = useState([]);
+  const [nfas,  setNfas]  = useState([]);
+  const [pos,   setPos]   = useState([]);
 
-  const [open,        setOpen]        = useState(false);
+  useEffect(() => {
+    setExpenseItemId(''); setTaskId(''); setNfaId(''); setPoId(''); setItems([]); setTasks([]); setNfas([]); setPos([]);
+    if (!expenseHeadId) return;
+    fetch(`/api/expense-items?expenseHeadId=${expenseHeadId}`, { headers: { Authorization: `Bearer ${tkn()}` } }).then(r=>r.ok?r.json():[]).then(setItems).catch(()=>{});
+    fetch(`/api/nfa-tracker?expenseHeadId=${expenseHeadId}`,   { headers: { Authorization: `Bearer ${tkn()}` } }).then(r=>r.ok?r.json():[]).then(setNfas).catch(()=>{});
+    fetch(`/api/pos?expenseHeadId=${expenseHeadId}`,           { headers: { Authorization: `Bearer ${tkn()}` } }).then(r=>r.ok?r.json():[]).then(setPos).catch(()=>{});
+  }, [expenseHeadId]);
+
+  useEffect(() => {
+    setTaskId(''); setTasks([]);
+    if (!expenseItemId) return;
+    fetch(`/api/tasks?expenseItemId=${expenseItemId}`, { headers: { Authorization: `Bearer ${tkn()}` } }).then(r=>r.ok?r.json():[]).then(setTasks).catch(()=>{});
+  }, [expenseItemId]);
+
+  return (
+    <>
+      <div className="field">
+        <label>Expense Head *</label>
+        <select value={expenseHeadId} onChange={e=>setExpenseHeadId(e.target.value)} required>
+          <option value="">— Select Expense Head —</option>
+          {expenseHeads.map(h=><option key={h.id} value={h.id}>{h.name}</option>)}
+        </select>
+      </div>
+      {items.length > 0 && (
+        <div className="field">
+          <label>Expense Item <span style={{color:'#94A3B8',fontWeight:400}}>(optional)</span></label>
+          <select value={expenseItemId} onChange={e=>setExpenseItemId(e.target.value)}>
+            <option value="">— None —</option>
+            {items.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}
+          </select>
+        </div>
+      )}
+      {tasks.length > 0 && (
+        <div className="field">
+          <label>Task <span style={{color:'#94A3B8',fontWeight:400}}>(optional)</span></label>
+          <select value={taskId} onChange={e=>setTaskId(e.target.value)}>
+            <option value="">— None —</option>
+            {tasks.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </div>
+      )}
+      {nfas.length > 0 && (
+        <div className="field">
+          <label>Linked NFA <span style={{color:'#94A3B8',fontWeight:400}}>(optional)</span></label>
+          <select value={nfaId} onChange={e=>setNfaId(e.target.value)}>
+            <option value="">— None —</option>
+            {nfas.map(n=><option key={n.id} value={n.id}>{n.nfaNumber} — {n.title} [{n.status}]</option>)}
+          </select>
+        </div>
+      )}
+      {pos.length > 0 && (
+        <div className="field">
+          <label>Linked PO <span style={{color:'#94A3B8',fontWeight:400}}>(optional)</span></label>
+          <select value={poId} onChange={e=>setPoId(e.target.value)}>
+            <option value="">— None —</option>
+            {pos.map(p=><option key={p.id} value={p.id}>{p.poNumber||'PO'} — {p.vendorName} ({fmt(p.amount)})</option>)}
+          </select>
+        </div>
+      )}
+    </>
+  );
+}
+
+export default function Invoices() {
+  const { user } = useAuth();
+  const canAdd  = ['Admin','Requestor','Finance'].includes(user?.role);
+  const canEdit = ['Admin','Finance'].includes(user?.role);
+
+  const [invoices,    setInvoices]    = useState([]);
+  const [expenseHeads,setExpenseHeads]= useState([]);
+  const [activeBudget,setActiveBudget]= useState(null);
+  const [glList,      setGlList]      = useState([]);
+  const [vendors,     setVendors]     = useState([]);
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState('');
+
+  const [addOpen,     setAddOpen]     = useState(false);
   const [uploadOpen,  setUploadOpen]  = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [editOpen,    setEditOpen]    = useState(false);
@@ -184,397 +171,377 @@ export default function Invoices() {
   const [delTarget,   setDelTarget]   = useState(null);
   const [preview,     setPreview]     = useState(null);
 
-  // Create form state
-  const [budgetId,    setBudgetId]    = useState("");
-  const [vendorId,    setVendorId]    = useState("");
-  const [vendorRaw,   setVendorRaw]   = useState("");
-  const [invNumber,   setInvNumber]   = useState("");
-  const [amount,      setAmount]      = useState("");
-  const [tax,         setTax]         = useState("");
-  const [date,        setDate]        = useState("");
-  const [dueDate,     setDueDate]     = useState("");
-  const [glCode,      setGlCode]      = useState("");
-  const [costCentre,  setCostCentre]  = useState(""); // ← NEW
-  const [uploading,   setUploading]   = useState(false);
-  const [uploadBudId, setUploadBudId] = useState("");
-  const [file,        setFile]        = useState(null);
-  const [zipping,     setZipping]     = useState(false);
+  // form
+  const [expenseHeadId,  setExpenseHeadId]  = useState('');
+  const [expenseItemId,  setExpenseItemId]  = useState('');
+  const [taskId,         setTaskId]         = useState('');
+  const [nfaId,          setNfaId]          = useState('');
+  const [poId,           setPoId]           = useState('');
+  const [vendorId,       setVendorId]       = useState('');
+  const [vendorRaw,      setVendorRaw]      = useState('');
+  const [invNumber,      setInvNumber]      = useState('');
+  const [amount,         setAmount]         = useState('');
+  const [tax,            setTax]            = useState('');
+  const [date,           setDate]           = useState('');
+  const [dueDate,        setDueDate]        = useState('');
+  const [glCode,         setGlCode]         = useState('');
+  const [costCentre,     setCostCentre]     = useState('');
+  const [uploading,           setUploading]           = useState(false);
+  const [uploadBudId,         setUploadBudId]         = useState('');
+  const [uploadExpenseHeadId, setUploadExpenseHeadId] = useState('');
+  const [uploadExpenseItemId, setUploadExpenseItemId] = useState('');
+  const [uploadTaskId,        setUploadTaskId]        = useState('');
+  const [uploadItems,         setUploadItems]         = useState([]);
+  const [uploadTasks,         setUploadTasks]         = useState([]);
+  const [file,                setFile]                = useState(null);
+  const [saving,              setSaving]              = useState(false);
 
-  const { user } = useAuth();
-  const canAdd  = ["Admin","Requestor","Finance"].includes(user?.role);
-  const canEdit = ["Admin","Finance"].includes(user?.role);
+  const loadBudgets = async () => {
+    try {
+      const r = await fetch('/api/budgets', { headers: h() });
+      if (r.ok) { const d = await r.json(); const u = d.filter((b,i,a)=>a.findIndex(x=>x.id===b.id)===i); if (u.length) setActiveBudget(u[0]); }
+    } catch {}
+  };
 
-  /* ── load ─────────────────────────────────────────────────── */
+  const loadHeads = async (budgetId) => {
+    if (!budgetId) return;
+    try { const r = await fetch(`/api/expense-heads?budgetId=${budgetId}`, { headers: h() }); if (r.ok) setExpenseHeads(await r.json()); } catch {}
+  };
+
   const load = async () => {
     try {
-      const [inv, bud, gl, ven] = await Promise.all([
-        fetch("/api/invoices", { headers: h() }).then(r => r.ok ? r.json() : []).catch(() => []),
-        fetch("/api/budgets",  { headers: h() }).then(r => r.ok ? r.json() : []).catch(() => []),
-        api.gl ? api.gl.list().catch(() => []) : Promise.resolve([]),
-        fetch("/api/vendors",  { headers: h() }).then(r => r.ok ? r.json() : []).catch(() => []),
+      const [inv,gl,ven] = await Promise.all([
+        fetch('/api/invoices', { headers: h() }).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        api.gl ? api.gl.list().catch(()=>[]) : Promise.resolve([]),
+        fetch('/api/vendors',  { headers: h() }).then(r=>r.ok?r.json():[]).catch(()=>[]),
       ]);
-      setInvoices(Array.isArray(inv) ? inv : []);
-      setBudgets(Array.isArray(bud) ? bud.filter(b => !b.parentProjectId) : []);
-      setGlList(Array.isArray(gl)  ? gl  : []);
-      setVendors(Array.isArray(ven) ? ven : []);
+      setInvoices(Array.isArray(inv)?inv:[]);
+      setGlList(Array.isArray(gl)?gl:[]);
+      setVendors(Array.isArray(ven)?ven:[]);
     } catch (e) { setError(e.message); }
   };
-  useEffect(() => { load().finally(() => setLoading(false)); }, []);
 
-  /* ── resolve vendor name ─────────────────────────────────── */
-  const resolveVendor = inv => {
-    if (inv.vendorId) return vendors.find(v => v.id === inv.vendorId)?.name || inv.vendorName || "—";
-    return inv.vendorName || "—";
+  useEffect(() => { Promise.all([loadBudgets(),load()]).finally(()=>setLoading(false)); }, []);
+  useEffect(() => { if (activeBudget) loadHeads(activeBudget.id); }, [activeBudget?.id]);
+
+  useEffect(() => {
+    setUploadExpenseItemId(''); setUploadTaskId(''); setUploadItems([]); setUploadTasks([]);
+    if (!uploadExpenseHeadId) return;
+    fetch(`/api/expense-items?expenseHeadId=${uploadExpenseHeadId}`, { headers: h() })
+      .then(r => r.ok ? r.json() : []).then(setUploadItems).catch(() => {});
+  }, [uploadExpenseHeadId]);
+
+  useEffect(() => {
+    setUploadTaskId(''); setUploadTasks([]);
+    if (!uploadExpenseItemId) return;
+    fetch(`/api/tasks?expenseItemId=${uploadExpenseItemId}`, { headers: h() })
+      .then(r => r.ok ? r.json() : []).then(setUploadTasks).catch(() => {});
+  }, [uploadExpenseItemId]);
+
+  const resolveVendor = inv => { if (inv.vendorId) return vendors.find(v=>v.id===inv.vendorId)?.name||inv.vendorName||'—'; return inv.vendorName||'—'; };
+  const resolveVendorCode = inv => { if (inv.vendorId) return vendors.find(v=>v.id===inv.vendorId)?.vendorCode||''; return ''; };
+
+  const resetForm = () => {
+    setExpenseHeadId(''); setExpenseItemId(''); setTaskId(''); setNfaId(''); setPoId('');
+    setVendorId(''); setVendorRaw(''); setInvNumber(''); setAmount(''); setTax('');
+    setDate(''); setDueDate(''); setGlCode(''); setCostCentre(''); setError('');
   };
 
-  /* ── create invoice ──────────────────────────────────────── */
+  /* ── Create ──────────────────────────────────────────────── */
   const handleCreate = async (e) => {
-    e.preventDefault();
-    setError("");
+    e?.preventDefault(); setError('');
+    if (!expenseHeadId) { setError('Expense Head is required.'); return; }
+    setSaving(true);
     try {
       let vId = vendorId, vName = vendorRaw;
-      if (!vId && vName.trim()) {
-        const v = await ensureVendor(vName);
-        if (v) { vId = v.id; vName = v.name; }
-      } else if (vId) {
-        vName = vendors.find(v => v.id === vId)?.name || vName;
-      }
-      if (!budgetId || !vName) { setError("Project and Vendor are required."); return; }
+      if (!vId && vName.trim()) { const v = await ensureVendor(vName); if (v) { vId=v.id; vName=v.name; } }
+      else if (vId) vName = vendors.find(v=>v.id===vId)?.name || vName;
+      if (!vName) { setError('Vendor is required.'); setSaving(false); return; }
 
-      const payload = {
-        budgetId,
-        vendorId:      vId || undefined,
-        vendorName:    vName,
-        invoiceNumber: invNumber || undefined,
-        amount:        parseFloat(amount),
-        tax:           parseFloat(tax) || 0,
-        date:          date    || undefined,
-        dueDate:       dueDate || undefined,
-        glCode:        glCode  || undefined,
-        costCentre:    costCentre.trim() || undefined,  // ← NEW
-      };
-
-      const r = await fetch("/api/invoices", { method: "POST", headers: hj(), body: JSON.stringify(payload) });
-      if (!r.ok) { const e = await r.json(); throw new Error(e.error || "Failed"); }
-
-      auditLog({ user, module: "Invoice", action: "Create", newValue: payload });
-      setOpen(false);
-      // Reset all fields including costCentre
-      [setBudgetId, setVendorId, setVendorRaw, setInvNumber,
-       setAmount, setTax, setDate, setDueDate, setGlCode, setCostCentre].forEach(s => s(""));
-      load();
+      const r = await fetch('/api/invoices', {
+        method:'POST', headers: hj(),
+        body: JSON.stringify({
+          budgetId: activeBudget?.id, expenseHeadId, expenseItemId: expenseItemId||null,
+          taskId: taskId||null, nfaId: nfaId||null, poId: poId||null,
+          vendorId: vId||undefined, vendorName: vName,
+          invoiceNumber: invNumber||undefined, amount: parseFloat(amount),
+          tax: parseFloat(tax)||0, date: date||undefined, dueDate: dueDate||undefined,
+          glCode: glCode||undefined, costCentre: costCentre.trim()||undefined,
+        }),
+      });
+      if (!r.ok) { const e = await r.json(); throw new Error(e.error||'Failed'); }
+      auditLog({ user, module:'Invoice', action:'Create', newValue:{vendorName:vName,amount:parseFloat(amount)} });
+      setAddOpen(false); resetForm(); load();
     } catch (e) { setError(e.message); }
+    setSaving(false);
   };
 
-  /* ── upload PDF ──────────────────────────────────────────── */
+  /* ── Upload PDF ──────────────────────────────────────────── */
   const handleUpload = async (e) => {
     e.preventDefault();
-    if (!file || !uploadBudId) return;
+    if (!file||!uploadBudId) return;
     setUploading(true);
     try {
       const res  = await api.invoices.upload(file, uploadBudId);
-      const prev = { ...res.preview, glCode: res.preview?.lineItems?.[0]?.glCode || "" };
-      if (prev.vendorName) {
-        const match = vendors.find(v => v.name.toLowerCase() === prev.vendorName.toLowerCase());
-        if (match) prev.vendorId = match.id;
-      }
+      const prev = { ...res.preview, glCode: res.preview?.lineItems?.[0]?.glCode||'',
+        expenseHeadId: uploadExpenseHeadId,
+        expenseItemId: uploadExpenseItemId || null,
+        taskId:        uploadTaskId        || null,
+        nfaId:'', poId:'' };
+      if (prev.vendorName) { const m = vendors.find(v=>v.name.toLowerCase()===prev.vendorName.toLowerCase()); if (m) prev.vendorId=m.id; }
       setPreview(prev); setPreviewOpen(true);
-      setUploadOpen(false); setFile(null); setUploadBudId("");
-    } finally { setUploading(false); }
+      setUploadOpen(false); setFile(null); setUploadBudId('');
+      setUploadExpenseHeadId(''); setUploadExpenseItemId(''); setUploadTaskId('');
+      setUploadItems([]); setUploadTasks([]);
+    } catch (e) { setError(e.message); }
+    finally { setUploading(false); }
   };
 
+  /* ── Confirm ─────────────────────────────────────────────── */
   const handleConfirm = async () => {
-    let vId = preview.vendorId, vName = preview.vendorName;
-    if (!vId && vName) {
-      const v = await ensureVendor(vName, {
-        gstNumber: preview.gstNumber    || "",
-        address:   preview.vendorAddress || "",
-        phone:     preview.vendorPhone  || "",
-        email:     preview.vendorEmail  || "",
-      });
-      if (v) { vId = v.id; vName = v.name; }
-    }
-    const payload = {
-      ...preview,
-      vendorId: vId, vendorName: vName,
-      lineItems: preview.lineItems?.length
-        ? preview.lineItems
-        : [{ description: "Invoice Allocation", amount: preview.amount, glCode: preview.glCode }],
-    };
-    await api.invoices.confirm(payload);
-    auditLog({ user, module: "Invoice", action: "Create via Upload", newValue: { vendorName: vName, amount: payload.amount } });
+    let vId=preview.vendorId, vName=preview.vendorName;
+    if (!vId&&vName) { const v=await ensureVendor(vName,{gstNumber:preview.gstNumber||'',address:preview.vendorAddress||'',phone:preview.vendorPhone||'',email:preview.vendorEmail||''}); if(v){vId=v.id;vName=v.name;} }
+    await api.invoices.confirm({
+      ...preview, vendorId:vId, vendorName:vName,
+      lineItems: preview.lineItems?.length ? preview.lineItems : [{ description:'Invoice Allocation', amount:preview.amount, glCode:preview.glCode }],
+    });
+    auditLog({ user, module:'Invoice', action:'Create via Upload', newValue:{vendorName:vName,amount:preview.amount} });
     setPreviewOpen(false); setPreview(null); load();
   };
 
-  /* ── edit save ───────────────────────────────────────────── */
-  const handleEditSave = async (form) => {
+  /* ── Edit save ───────────────────────────────────────────── */
+  const handleEditSave = async () => {
+    setSaving(true);
     const r = await fetch(`/api/invoices/${editTarget.id}`, {
-      method: "PATCH", headers: hj(), body: JSON.stringify({
-        vendorId:      form.vendorId      || undefined,
-        vendorName:    form.vendorName,
-        invoiceNumber: form.invoiceNumber,
-        amount:        Number(form.amount),
-        tax:           Number(form.tax) || 0,
-        date:          form.date,
-        dueDate:       form.dueDate,
-        glCode:        form.glCode,
-        budgetId:      form.budgetId,
-        costCentre:    form.costCentre?.trim() || undefined,  // ← NEW
-      }),
+      method:'PATCH', headers: hj(),
+      body: JSON.stringify({ vendorId:editTarget.vendorId||undefined, vendorName:editTarget.vendorName, invoiceNumber:editTarget.invoiceNumber, amount:Number(editTarget.amount), tax:Number(editTarget.tax)||0, date:editTarget.date, dueDate:editTarget.dueDate, glCode:editTarget.glCode, costCentre:editTarget.costCentre?.trim()||undefined }),
     });
-    if (r.ok) {
-      auditLog({ user, module: "Invoice", action: "Edit", recordId: editTarget.id, oldValue: editTarget, newValue: form });
-      setEditOpen(false); setEditTarget(null); load();
-    }
+    if (r.ok) { auditLog({user,module:'Invoice',action:'Edit',recordId:editTarget.id}); setEditOpen(false); setEditTarget(null); load(); }
+    setSaving(false);
   };
 
-  /* ── delete ──────────────────────────────────────────────── */
+  /* ── Delete ──────────────────────────────────────────────── */
   const handleDelete = async () => {
-    await fetch(`/api/invoices/${delTarget.id}`, { method: "DELETE", headers: h() });
-    auditLog({ user, module: "Invoice", action: "Delete", recordId: delTarget.id, oldValue: delTarget });
+    await fetch(`/api/invoices/${delTarget.id}`,{method:'DELETE',headers:h()});
+    auditLog({user,module:'Invoice',action:'Delete',recordId:delTarget.id});
     setDelOpen(false); setDelTarget(null); load();
   };
 
-  /* ── bulk download ───────────────────────────────────────── */
-  const handleBulkDownload = () => {
-    const withFiles = invoices.filter(i => i.fileUrl || i.pdfUrl);
-    if (!withFiles.length) { alert("No invoice documents found."); return; }
-    setZipping(true);
-    withFiles.forEach(inv => window.open(inv.fileUrl || inv.pdfUrl, "_blank"));
-    setZipping(false);
-  };
+  const downloadAll = () => invoices.filter(i=>i.fileUrl||i.pdfUrl).forEach(i=>{const a=document.createElement('a');a.href=i.fileUrl||i.pdfUrl;a.download=`Invoice_${i.invoiceNumber||i.id}.pdf`;a.click();});
 
-  if (loading) return <Box display="flex" justifyContent="center" p={4}><CircularProgress /></Box>;
-
-  // column count changes: +1 for Cost Centre
-  const colCount = canEdit ? 11 : 10;
+  if (loading) return <div className="spinner-wrap"><div className="spinner"/></div>;
 
   return (
-    <Box>
-      {/* Header */}
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2} flexWrap="wrap" gap={1}>
-        <Box>
-          <Typography variant="h5">Invoices</Typography>
-          <Typography variant="caption" color="text.secondary">{FY}</Typography>
-        </Box>
+    <div className="page">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Invoices</h1>
+          <div style={{fontSize:12,color:'#94A3B8',marginTop:2}}>{FY}</div>
+        </div>
         {canAdd && (
-          <Box display="flex" gap={1} flexWrap="wrap">
-            <Button startIcon={<FolderZipIcon />} variant="outlined" onClick={handleBulkDownload} disabled={zipping}>
-              {zipping ? "Opening…" : "Download All Docs"}
-            </Button>
-            <Button startIcon={<UploadIcon />} variant="outlined" onClick={() => setUploadOpen(true)}>Upload PDF</Button>
-            <Button startIcon={<AddIcon />} variant="contained" onClick={() => { setOpen(true); setError(""); }}>Add Invoice</Button>
-          </Box>
+          <div className="btn-row">
+            <button className="btn btn-ghost btn-sm" onClick={downloadAll}>↓ Download All</button>
+            <button className="btn btn-outline btn-sm" onClick={()=>setUploadOpen(true)}>↑ Upload PDF</button>
+            <button className="btn btn-primary" onClick={()=>{setAddOpen(true);resetForm();}}>+ Add Invoice</button>
+          </div>
         )}
-      </Box>
+      </div>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {error && <div className="alert alert-error" style={{marginBottom:12}}>{error}<button onClick={()=>setError('')} style={{float:'right',background:'none',border:'none',cursor:'pointer'}}>✕</button></div>}
 
-      <Card>
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell>Vendor</TableCell>
-              <TableCell>Invoice #</TableCell>
-              <TableCell align="right">Amount</TableCell>
-              <TableCell align="right">Tax</TableCell>
-              <TableCell>Date</TableCell>
-              <TableCell>Due</TableCell>
-              <TableCell>Cost Centre</TableCell>
-              <TableCell>GL</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell>Doc</TableCell>
-              {canEdit && <TableCell align="right">Actions</TableCell>}
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {invoices.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={colCount} align="center" sx={{ py: 4, color: "text.secondary" }}>
-                  No invoices found.
-                </TableCell>
-              </TableRow>
-            )}
-            {invoices.map(i => (
-              <TableRow key={i.id} hover>
-                <TableCell sx={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {resolveVendor(i)}
-                </TableCell>
-                <TableCell>{i.invoiceNumber || "—"}</TableCell>
-                <TableCell align="right">{fmt(i.amount)}</TableCell>
-                <TableCell align="right">{fmt(i.tax)}</TableCell>
-                <TableCell>{i.date    || "—"}</TableCell>
-                <TableCell>{i.dueDate || "—"}</TableCell>
-                {/* ── Cost Centre column ── */}
-                <TableCell>
-                  {i.costCentre
-                    ? <Typography variant="caption" sx={{ fontFamily: "monospace", color: "#4338CA" }}>{i.costCentre}</Typography>
-                    : <Typography variant="caption" color="text.disabled">—</Typography>}
-                </TableCell>
-                <TableCell>
-                  {i.lineItems?.map(x => x.glCode).filter(Boolean).join(", ") || i.glCode || "—"}
-                </TableCell>
-                <TableCell>
-                  <Chip label={i.status || "Pending"} size="small"
-                    color={i.status === "Paid" ? "success" : i.status === "Partial" ? "info" : "warning"} />
-                </TableCell>
-                <TableCell>
-                  {(i.fileUrl || i.pdfUrl)
-                    ? <IconButton size="small" color="success" component="a"
-                        href={i.fileUrl || i.pdfUrl} target="_blank"
-                        download={`Invoice_${i.invoiceNumber || i.id}.pdf`}>
-                        <DownloadIcon fontSize="small" />
-                      </IconButton>
-                    : <Typography variant="caption" color="text.disabled">—</Typography>}
-                </TableCell>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Invoice #</th>
+              <th>Vendor</th>
+              <th>Vendor Code</th>
+              <th>PO Number</th>
+              <th>NFA Number</th>
+              <th style={{textAlign:'right'}}>Amount</th>
+              <th style={{textAlign:'right'}}>Tax</th>
+              <th>Date</th>
+              <th>Cost Centre</th>
+              <th>Status</th>
+              <th style={{textAlign:'center'}}>Doc</th>
+              {canEdit && <th style={{textAlign:'right'}}>Actions</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {invoices.length===0 && <tr><td colSpan={canEdit?12:11} style={{textAlign:'center',padding:'40px',color:'#94A3B8'}}>No invoices found.</td></tr>}
+            {invoices.map(i=>(
+              <tr key={i.id}>
+                <td style={{fontFamily:'monospace',fontSize:12,fontWeight:700}}>{i.invoiceNumber||'—'}</td>
+                <td style={{maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:13}}>{resolveVendor(i)}</td>
+                <td style={{fontFamily:'monospace',fontSize:11,color:'#0EA5A0'}}>{resolveVendorCode(i)||'—'}</td>
+                <td style={{fontFamily:'monospace',fontSize:11}}>{i.poNumber||'—'}</td>
+                <td style={{fontFamily:'monospace',fontSize:11,color:'#7C3AED'}}>{i.nfaNumber||'—'}</td>
+                <td style={{textAlign:'right',fontWeight:600}}>{fmt(i.amount)}</td>
+                <td style={{textAlign:'right',fontSize:12}}>{fmt(i.tax)}</td>
+                <td style={{fontSize:12}}>{i.date||'—'}</td>
+                <td style={{fontFamily:'monospace',fontSize:11,color:'#4338CA'}}>{i.costCentre||'—'}</td>
+                <td>
+                  <span className="chip" style={{
+                    background:i.status==='Paid'?'#D1FAE5':i.status==='Partial'?'#DBEAFE':'#FEF3C7',
+                    color:     i.status==='Paid'?'#065F46':i.status==='Partial'?'#1E40AF':'#92400E',
+                  }}>{i.status||'Pending'}</span>
+                </td>
+                <td style={{textAlign:'center'}}>
+                  {(i.fileUrl||i.pdfUrl)
+                    ? <a className="btn-icon" style={{color:'#10B981'}} href={i.fileUrl||i.pdfUrl} target="_blank" rel="noreferrer" download={`Invoice_${i.invoiceNumber||i.id}.pdf`}>↓</a>
+                    : <span style={{color:'#CBD5E1'}}>—</span>}
+                </td>
                 {canEdit && (
-                  <TableCell align="right">
-                    <Tooltip title="Edit">
-                      <IconButton size="small" onClick={() => { setEditTarget(i); setEditOpen(true); }}>
-                        <EditIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
-                    <Tooltip title="Delete">
-                      <IconButton size="small" color="error" onClick={() => { setDelTarget(i); setDelOpen(true); }}>
-                        <DeleteIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
-                  </TableCell>
+                  <td style={{textAlign:'right'}}>
+                    <button className="btn-icon" onClick={()=>{setEditTarget({...i});setEditOpen(true);}}>✏</button>
+                    <button className="btn-icon red" onClick={()=>{setDelTarget(i);setDelOpen(true);}}>🗑</button>
+                  </td>
                 )}
-              </TableRow>
+              </tr>
             ))}
-          </TableBody>
-        </Table>
-      </Card>
+          </tbody>
+        </table>
+      </div>
 
-      {/* ── Add Invoice Dialog ── */}
-      <Dialog open={open} onClose={() => { setOpen(false); setError(""); }} maxWidth="sm" fullWidth>
-        <DialogTitle>Add Invoice — {FY}</DialogTitle>
-        <DialogContent>
-          {error && <Alert severity="error" sx={{ mb: 1 }}>{error}</Alert>}
-          <Box component="form" onSubmit={handleCreate}>
-            <FormControl fullWidth margin="normal" required>
-              <InputLabel>Project</InputLabel>
-              <Select value={budgetId} onChange={e => setBudgetId(e.target.value)} label="Project">
-                {budgets.map(b => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
-              </Select>
-            </FormControl>
+      {/* Add Modal */}
+      <Modal open={addOpen} onClose={()=>{setAddOpen(false);resetForm();}} title={`Add Invoice — ${FY}`} large
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={()=>{setAddOpen(false);resetForm();}}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={saving||!expenseHeadId||!amount}>
+            {saving?'Creating…':'Create Invoice'}
+          </button>
+        </>}>
+        {error && <div className="alert alert-error">{error}</div>}
 
-            <VendorAutocomplete
-              vendors={vendors}
-              value={vendorId}
-              onChange={(id, name) => { setVendorId(id); setVendorRaw(name); }}
-              onNameChange={setVendorRaw}
-            />
+        <LinkedSelectors expenseHeadId={expenseHeadId} setExpenseHeadId={setExpenseHeadId} expenseItemId={expenseItemId} setExpenseItemId={setExpenseItemId} taskId={taskId} setTaskId={setTaskId} nfaId={nfaId} setNfaId={setNfaId} poId={poId} setPoId={setPoId} expenseHeads={expenseHeads} />
 
-            <TextField fullWidth label="Invoice number" margin="normal"
-              value={invNumber} onChange={e => setInvNumber(e.target.value)} />
-            <TextField fullWidth type="number" label="Amount (₹)" margin="normal" required
-              value={amount} onChange={e => setAmount(e.target.value)} />
-            <TextField fullWidth type="number" label="Tax (₹)" margin="normal"
-              value={tax} onChange={e => setTax(e.target.value)} />
-            <TextField fullWidth type="date" InputLabelProps={{ shrink: true }} label="Date" margin="normal"
-              value={date} onChange={e => setDate(e.target.value)} />
-            <TextField fullWidth type="date" InputLabelProps={{ shrink: true }} label="Due date" margin="normal"
-              value={dueDate} onChange={e => setDueDate(e.target.value)} />
+        <VendorAutocomplete vendors={vendors} value={vendorId} onChange={(id,name)=>{setVendorId(id);setVendorRaw(name);}} onNameChange={setVendorRaw}/>
 
-            {/* ── Cost Centre (optional) ── */}
-            <TextField fullWidth label="Cost Centre" margin="normal"
-              value={costCentre} onChange={e => setCostCentre(e.target.value)}
-              placeholder="e.g. CC-IT-001  (optional)"
-              helperText="Optional — leave blank if not applicable"
-            />
+        <div className="field"><label>Invoice Number</label><input value={invNumber} onChange={e=>setInvNumber(e.target.value)}/></div>
+        <div className="fields-2">
+          <div className="field"><label>Amount (₹) *</label><input type="number" min={0} step={0.01} value={amount} onChange={e=>setAmount(e.target.value)} required/></div>
+          <div className="field"><label>Tax (₹)</label><input type="number" min={0} step={0.01} value={tax} onChange={e=>setTax(e.target.value)}/></div>
+        </div>
+        <div className="fields-2">
+          <div className="field"><label>Date</label><input type="date" value={date} onChange={e=>setDate(e.target.value)}/></div>
+          <div className="field"><label>Due Date</label><input type="date" value={dueDate} onChange={e=>setDueDate(e.target.value)}/></div>
+        </div>
+        <div className="field"><label>Cost Centre</label><input value={costCentre} placeholder="e.g. CC-IT-001 (optional)" onChange={e=>setCostCentre(e.target.value)}/></div>
+        {glList.length > 0 && (
+          <div className="field"><label>GL Code</label>
+            <select value={glCode} onChange={e=>setGlCode(e.target.value)}>
+              <option value="">— None —</option>
+              {glList.map(gl=><option key={gl.code} value={gl.code}>{gl.code} — {gl.name}</option>)}
+            </select>
+          </div>
+        )}
+      </Modal>
 
-            {glList.length > 0 && (
-              <FormControl fullWidth margin="normal">
-                <InputLabel>GL Code</InputLabel>
-                <Select value={glCode} onChange={e => setGlCode(e.target.value)} label="GL Code">
-                  {glList.map(gl => <MenuItem key={gl.code} value={gl.code}>{gl.code} — {gl.name}</MenuItem>)}
-                </Select>
-              </FormControl>
-            )}
+      {/* Upload Modal */}
+      <Modal open={uploadOpen} onClose={()=>setUploadOpen(false)} title="Upload Invoice PDF" large
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={()=>setUploadOpen(false)}>Cancel</button>
+          <button className="btn btn-primary btn-sm" disabled={!file||!uploadBudId||!uploadExpenseHeadId||uploading} onClick={handleUpload}>
+            {uploading?'Uploading & Parsing…':'Upload & Parse'}
+          </button>
+        </>}>
+        <div className="field"><label>Budget *</label>
+          <select value={uploadBudId} onChange={e=>setUploadBudId(e.target.value)} required>
+            <option value="">— Select —</option>
+            {activeBudget && <option value={activeBudget.id}>{activeBudget.fy}</option>}
+          </select>
+        </div>
+        <div className="field"><label>Expense Head *</label>
+          <select value={uploadExpenseHeadId} onChange={e=>setUploadExpenseHeadId(e.target.value)} required>
+            <option value="">— Select Expense Head —</option>
+            {expenseHeads.map(h=><option key={h.id} value={h.id}>{h.name}</option>)}
+          </select>
+        </div>
+        {uploadItems.length > 0 && (
+          <div className="field"><label>Expense Item <span style={{color:'#94A3B8',fontWeight:400}}>(optional)</span></label>
+            <select value={uploadExpenseItemId} onChange={e=>setUploadExpenseItemId(e.target.value)}>
+              <option value="">— None —</option>
+              {uploadItems.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}
+            </select>
+          </div>
+        )}
+        {uploadTasks.length > 0 && (
+          <div className="field"><label>Task <span style={{color:'#94A3B8',fontWeight:400}}>(optional)</span></label>
+            <select value={uploadTaskId} onChange={e=>setUploadTaskId(e.target.value)}>
+              <option value="">— None —</option>
+              {uploadTasks.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </div>
+        )}
+        <div className="field"><label>PDF File *</label>
+          <input type="file" accept="application/pdf" onChange={e=>setFile(e.target.files[0])}/>
+          {file && <div style={{fontSize:12,color:'#64748B',marginTop:4}}>Selected: {file.name}</div>}
+        </div>
+      </Modal>
 
-            <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
-              <Button type="submit" variant="contained"
-                disabled={!budgetId || (!vendorId && !vendorRaw) || !amount}>
-                Create
-              </Button>
-              <Button onClick={() => { setOpen(false); setError(""); }}>Cancel</Button>
-            </Box>
-          </Box>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Upload Dialog ── */}
-      <Dialog open={uploadOpen} onClose={() => setUploadOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Upload Invoice PDF</DialogTitle>
-        <DialogContent>
-          <Box component="form" onSubmit={handleUpload}>
-            <FormControl fullWidth margin="normal" required>
-              <InputLabel>Project</InputLabel>
-              <Select value={uploadBudId} onChange={e => setUploadBudId(e.target.value)} label="Project">
-                {budgets.map(b => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
-              </Select>
-            </FormControl>
-            <Button variant="outlined" component="label" fullWidth sx={{ mt: 2 }}>
-              {file ? file.name : "Choose PDF"}
-              <input type="file" accept="application/pdf" hidden onChange={e => setFile(e.target.files[0])} />
-            </Button>
-            <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
-              <Button type="submit" variant="contained" disabled={!file || !uploadBudId || uploading}>
-                {uploading ? "Uploading…" : "Upload & Parse"}
-              </Button>
-              <Button onClick={() => setUploadOpen(false)}>Cancel</Button>
-            </Box>
-          </Box>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Preview / Confirm Dialog ── */}
-      <Dialog open={previewOpen} onClose={() => setPreviewOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Review Parsed Invoice</DialogTitle>
-        <DialogContent>
-          {preview && (
-            <>
-              <Alert severity="info" sx={{ mb: 2, fontSize: 12 }}>
-                {preview.vendorId ? "Vendor matched from master." : "Vendor not in master — will be auto-created on confirm."}
-              </Alert>
-              <TextField fullWidth label="Vendor Name"    value={preview.vendorName    || ""} margin="normal" onChange={e => setPreview({ ...preview, vendorName: e.target.value, vendorId: "" })} />
-              <TextField fullWidth label="Invoice Number" value={preview.invoiceNumber || ""} margin="normal" onChange={e => setPreview({ ...preview, invoiceNumber: e.target.value })} />
-              <TextField fullWidth type="number" label="Amount (₹)" value={preview.amount || 0} margin="normal" onChange={e => setPreview({ ...preview, amount: parseFloat(e.target.value) })} />
-              <TextField fullWidth type="number" label="Tax (₹)"    value={preview.tax    || 0} margin="normal" onChange={e => setPreview({ ...preview, tax:    parseFloat(e.target.value) })} />
-              <TextField fullWidth type="date" InputLabelProps={{ shrink: true }} label="Invoice Date" value={preview.date    || ""} margin="normal" onChange={e => setPreview({ ...preview, date:    e.target.value })} />
-              <TextField fullWidth type="date" InputLabelProps={{ shrink: true }} label="Due Date"     value={preview.dueDate || ""} margin="normal" onChange={e => setPreview({ ...preview, dueDate: e.target.value })} />
-              {glList.length > 0 && (
-                <FormControl fullWidth margin="normal">
-                  <InputLabel>GL Code</InputLabel>
-                  <Select value={preview.glCode || ""} onChange={e => setPreview({ ...preview, glCode: e.target.value })} label="GL Code">
-                    {glList.map(gl => <MenuItem key={gl.code} value={gl.code}>{gl.code} — {gl.name}</MenuItem>)}
-                  </Select>
-                </FormControl>
-              )}
-              <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
-                <Button variant="contained" onClick={handleConfirm}>Confirm & Save</Button>
-                <Button onClick={() => setPreviewOpen(false)}>Cancel</Button>
-              </Box>
-            </>
+      {/* Preview Modal */}
+      <Modal open={previewOpen} onClose={()=>setPreviewOpen(false)} title="Review Parsed Invoice" large
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={()=>setPreviewOpen(false)}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleConfirm}>Confirm & Save</button>
+        </>}>
+        {preview && (<>
+          <div className={`alert ${preview.vendorId?'alert-success':'alert-info'}`} style={{marginBottom:14}}>
+            {preview.vendorId?'Vendor matched from master.':'Vendor not in master — will be auto-created on confirm.'}
+          </div>
+          {preview.expenseHeadId && (
+            <div style={{marginBottom:12,padding:'8px 12px',background:'#F0FDF4',border:'1px solid #BBF7D0',borderRadius:6,fontSize:12,color:'#166534'}}>
+              Linked to: <strong>{expenseHeads.find(h=>h.id===preview.expenseHeadId)?.name || preview.expenseHeadId}</strong>
+            </div>
           )}
-        </DialogContent>
-      </Dialog>
+          <div className="field"><label>Vendor Name</label><input value={preview.vendorName||''} onChange={e=>setPreview({...preview,vendorName:e.target.value,vendorId:''})}/></div>
+          <div className="field"><label>Invoice Number</label><input value={preview.invoiceNumber||''} onChange={e=>setPreview({...preview,invoiceNumber:e.target.value})}/></div>
+          <div className="fields-2">
+            <div className="field"><label>Amount (₹)</label><input type="number" value={preview.amount||0} onChange={e=>setPreview({...preview,amount:parseFloat(e.target.value)})}/></div>
+            <div className="field"><label>Tax (₹)</label><input type="number" value={preview.tax||0} onChange={e=>setPreview({...preview,tax:parseFloat(e.target.value)})}/></div>
+          </div>
+          <div className="fields-2">
+            <div className="field"><label>Date</label><input type="date" value={preview.date||''} onChange={e=>setPreview({...preview,date:e.target.value})}/></div>
+            <div className="field"><label>Due Date</label><input type="date" value={preview.dueDate||''} onChange={e=>setPreview({...preview,dueDate:e.target.value})}/></div>
+          </div>
+        </>)}
+      </Modal>
 
-      {/* ── Edit Dialog ── */}
-      <EditDialog
-        open={editOpen} invoice={editTarget} glList={glList} budgets={budgets} vendors={vendors}
-        onSave={handleEditSave}
-        onClose={() => { setEditOpen(false); setEditTarget(null); }}
-      />
+      {/* Edit Modal */}
+      <Modal open={editOpen} onClose={()=>{setEditOpen(false);setEditTarget(null);}} title={`Edit Invoice — ${editTarget?.invoiceNumber||editTarget?.id||''}`} large
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={()=>{setEditOpen(false);setEditTarget(null);}}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleEditSave} disabled={saving}>Save Changes</button>
+        </>}>
+        {editTarget && (<>
+          <div className="field"><label>Vendor Name</label><input value={editTarget.vendorName||''} onChange={e=>setEditTarget(t=>({...t,vendorName:e.target.value}))}/></div>
+          <div className="field"><label>Invoice Number</label><input value={editTarget.invoiceNumber||''} onChange={e=>setEditTarget(t=>({...t,invoiceNumber:e.target.value}))}/></div>
+          <div className="fields-2">
+            <div className="field"><label>Amount (₹)</label><input type="number" value={editTarget.amount||''} onChange={e=>setEditTarget(t=>({...t,amount:parseFloat(e.target.value)}))}/></div>
+            <div className="field"><label>Tax (₹)</label><input type="number" value={editTarget.tax||''} onChange={e=>setEditTarget(t=>({...t,tax:parseFloat(e.target.value)}))}/></div>
+          </div>
+          <div className="fields-2">
+            <div className="field"><label>Date</label><input type="date" value={editTarget.date||''} onChange={e=>setEditTarget(t=>({...t,date:e.target.value}))}/></div>
+            <div className="field"><label>Due Date</label><input type="date" value={editTarget.dueDate||''} onChange={e=>setEditTarget(t=>({...t,dueDate:e.target.value}))}/></div>
+          </div>
+          <div className="field"><label>Cost Centre</label><input value={editTarget.costCentre||''} placeholder="Optional" onChange={e=>setEditTarget(t=>({...t,costCentre:e.target.value}))}/></div>
+          {glList.length>0 && <div className="field"><label>GL Code</label>
+            <select value={editTarget.glCode||''} onChange={e=>setEditTarget(t=>({...t,glCode:e.target.value}))}>
+              <option value="">— None —</option>
+              {glList.map(gl=><option key={gl.code} value={gl.code}>{gl.code} — {gl.name}</option>)}
+            </select>
+          </div>}
+        </>)}
+      </Modal>
 
-      {/* ── Delete Confirm ── */}
-      <ConfirmDelete
-        open={delOpen} name={delTarget?.invoiceNumber || delTarget?.id || ""}
-        onConfirm={handleDelete}
-        onClose={() => { setDelOpen(false); setDelTarget(null); }}
-      />
-    </Box>
+      {/* Delete Modal */}
+      <Modal open={delOpen} onClose={()=>setDelOpen(false)} title="Delete Invoice?"
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={()=>setDelOpen(false)}>Cancel</button>
+          <button className="btn btn-danger btn-sm" onClick={handleDelete}>Delete</button>
+        </>}>
+        <p style={{margin:0,fontSize:13}}>Delete invoice <strong>#{delTarget?.invoiceNumber||delTarget?.id||''}</strong>? Cannot be undone.</p>
+      </Modal>
+    </div>
   );
 }

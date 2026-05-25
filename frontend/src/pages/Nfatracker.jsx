@@ -1,629 +1,559 @@
+/**
+ * pages/NFATracker.jsx — Zero MUI
+ * NFA linked to Expense Head (required), Expense Item, Task (optional)
+ * PDF upload with backend AI parsing + preview modal
+ * FLOW: Select Hierarchy → Upload PDF → Parse → Preview Modal → Confirm
+ *
+ * FIX: handleCreate and handleConfirmPreview now use FormData (not JSON)
+ *      so multer on the backend can parse them without 413 errors.
+ *      Never set Content-Type on FormData — browser sets multipart boundary.
+ */
 import { useState, useEffect, useRef } from 'react';
-import {
-  Box, Button, Card, Table, TableBody, TableCell, TableHead, TableRow,
-  Typography, Dialog, DialogTitle, DialogContent, TextField, Chip,
-  CircularProgress, MenuItem, Select, InputLabel, FormControl,
-  Alert, LinearProgress, Divider,
-} from '@mui/material';
-import AddIcon                  from '@mui/icons-material/Add';
-import CheckIcon                from '@mui/icons-material/Check';
-import CloseIcon                from '@mui/icons-material/Close';
-import SendIcon                 from '@mui/icons-material/Send';
-import CheckCircleIcon          from '@mui/icons-material/CheckCircle';
-import RadioButtonUncheckedIcon from '@mui/icons-material/RadioButtonUnchecked';
-import UploadFileIcon           from '@mui/icons-material/UploadFile';
-import DownloadIcon             from '@mui/icons-material/Download';
-import AutoAwesomeIcon          from '@mui/icons-material/AutoAwesome';
-import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import './app.css';
 
-const fmt = (v) => 'Rs.' + Number(v || 0).toLocaleString('en-IN');
+const fmt   = v => `₹${Number(v || 0).toLocaleString('en-IN')}`;
+const tkn   = () => localStorage.getItem('token') || '';
+const hj    = () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${tkn()}` });
+const authH = () => ({ Authorization: `Bearer ${tkn()}` });
 
-/* ── Tick / checkbox button ─────────────────────────────────── */
-function TickButton({ done, label, onClick, disabled }) {
+/* ── Shared Modal ────────────────────────────────────────── */
+function Modal({ open, onClose, title, children, footer, large }) {
+  if (!open) return null;
   return (
-    <Box
-      onClick={disabled ? undefined : onClick}
-      sx={{
-        display: 'flex', alignItems: 'center', gap: 1.2,
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        p: '8px 14px', borderRadius: 2, width: 'fit-content',
-        border: '1.5px solid', userSelect: 'none',
-        borderColor: done ? '#6EE7B7' : '#E2E8F0',
-        bgcolor:     done ? '#F0FDF4' : '#FAFAFA',
-        opacity: disabled ? 0.45 : 1,
-        transition: 'all 0.15s',
-        '&:hover': disabled ? {} : {
-          borderColor: done ? '#10B981' : '#94A3B8',
-          bgcolor:     done ? '#DCFCE7' : '#F1F5F9',
-        },
-      }}
-    >
-      {done
-        ? <CheckCircleIcon sx={{ color: '#10B981', fontSize: 20 }} />
-        : <RadioButtonUncheckedIcon sx={{ color: '#CBD5E1', fontSize: 20 }} />}
-      <Typography variant="body2" fontWeight={done ? 700 : 400}
-        color={done ? '#065F46' : '#64748B'}>
-        {label}
-      </Typography>
-    </Box>
+    <div className="modal-overlay" onClick={onClose}>
+      <div className={`modal${large ? ' modal-lg' : ' modal-sm'}`} onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">{title}</h2>
+          <button className="btn-icon" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-footer">{footer}</div>}
+      </div>
+    </div>
   );
 }
 
-/* ── Vertical connector line between steps ──────────────────── */
-function StepLine({ done }) {
+/* ── Hierarchy selectors ─────────────────────────────────── */
+function HierarchySelectors({ expenseHeadId, setExpenseHeadId, expenseItemId, setExpenseItemId, taskId, setTaskId, expenseHeads }) {
+  const [items, setItems] = useState([]);
+  const [tasks, setTasks] = useState([]);
+
+  useEffect(() => {
+    setExpenseItemId(''); setTaskId(''); setItems([]); setTasks([]);
+    if (!expenseHeadId) return;
+    fetch(`/api/expense-items?expenseHeadId=${expenseHeadId}`, { headers: authH() })
+      .then(r => r.ok ? r.json() : []).then(setItems).catch(() => {});
+  }, [expenseHeadId]);
+
+  useEffect(() => {
+    setTaskId(''); setTasks([]);
+    if (!expenseItemId) return;
+    fetch(`/api/tasks?expenseItemId=${expenseItemId}`, { headers: authH() })
+      .then(r => r.ok ? r.json() : []).then(setTasks).catch(() => {});
+  }, [expenseItemId]);
+
   return (
-    <Box sx={{
-      width: 2, height: 20, ml: '19px', my: 0.4, borderRadius: 1,
-      bgcolor: done ? '#10B981' : '#E2E8F0',
-    }} />
+    <>
+      <div className="field">
+        <label>Expense Head *</label>
+        <select value={expenseHeadId} onChange={e => setExpenseHeadId(e.target.value)} required>
+          <option value="">— Select Expense Head —</option>
+          {expenseHeads.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
+        </select>
+      </div>
+      {items.length > 0 && (
+        <div className="field">
+          <label>Expense Item <span style={{ color: '#94A3B8', fontWeight: 400 }}>(optional)</span></label>
+          <select value={expenseItemId} onChange={e => setExpenseItemId(e.target.value)}>
+            <option value="">— None —</option>
+            {items.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
+          </select>
+        </div>
+      )}
+      {tasks.length > 0 && (
+        <div className="field">
+          <label>Task <span style={{ color: '#94A3B8', fontWeight: 400 }}>(optional)</span></label>
+          <select value={taskId} onChange={e => setTaskId(e.target.value)}>
+            <option value="">— None —</option>
+            {tasks.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </div>
+      )}
+    </>
   );
 }
 
-/* ── Status chip for table ──────────────────────────────────── */
-function StatusChip({ a }) {
-  if (a.pdfUrl && a.nfaApproved)
-    return <Chip label="Complete" size="small" sx={{ bgcolor: '#D1FAE5', color: '#065F46', fontWeight: 700, border: '1px solid #6EE7B7' }} />;
-  if (a.nfaApproved)
-    return <Chip label="Approved" size="small" sx={{ bgcolor: '#DBEAFE', color: '#1E40AF', fontWeight: 700, border: '1px solid #93C5FD' }} />;
-  if (a.nfaRaised)
-    return <Chip label="Raised" size="small" sx={{ bgcolor: '#FEF3C7', color: '#92400E', fontWeight: 700, border: '1px solid #FCD34D' }} />;
-  return <Chip label="Draft" size="small" sx={{ bgcolor: '#F1F5F9', color: '#475569', fontWeight: 700 }} />;
-}
+export default function NFATracker() {
+  const { user } = useAuth();
+  const canEdit    = ['Admin', 'Finance', 'Requestor'].includes(user?.role);
+  const canApprove = ['Admin', 'Approver', 'Finance'].includes(user?.role);
 
-/* ── NFA Workflow Dialog ─────────────────────────────────────── */
-function NFAWorkflowDialog({
-  nfa, projects, open, onClose, onUpdated,
-  canApprove, canCreate,
-  approveComment, setApproveComment, onApprove, onSubmit,
-}) {
-  const [saving,    setSaving]    = useState(false);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiMsg,     setAiMsg]     = useState('');
-  const [local,     setLocal]     = useState(nfa);
-  const [manualAmt, setManualAmt] = useState('');
+  const [list,         setList]         = useState([]);
+  const [expenseHeads, setExpenseHeads] = useState([]);
+  const [activeBudget, setActiveBudget] = useState(null);
+  const [loading,      setLoading]      = useState(true);
+  const [addOpen,      setAddOpen]      = useState(false);
+  const [uploadOpen,   setUploadOpen]   = useState(false);
+  const [previewOpen,  setPreviewOpen]  = useState(false);
+  const [editTarget,   setEditTarget]   = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [preview,      setPreview]      = useState(null);
+  const [error,        setError]        = useState('');
+
+  // form state
+  const [expenseHeadId, setExpenseHeadId] = useState('');
+  const [expenseItemId, setExpenseItemId] = useState('');
+  const [taskId,        setTaskId]        = useState('');
+  const [nfaNumber,     setNfaNumber]     = useState('');
+  const [title,         setTitle]         = useState('');
+  const [description,   setDescription]   = useState('');
+  const [amount,        setAmount]        = useState('');
+  const [pdfUrl,        setPdfUrl]        = useState(null);
+  const [pdfName,       setPdfName]       = useState('');
+  const [uploading,     setUploading]     = useState(false);
+  const [saving,        setSaving]        = useState(false);
   const fileRef = useRef(null);
 
-  useEffect(() => { setLocal(nfa); setAiMsg(''); }, [nfa]);
-
-  const linkedProject = projects.find((p) => p.id === local.linkedProjectId);
-
-  const applyPatch = async (data) => {
-    setSaving(true);
-    const token = localStorage.getItem('token') || '';
+  const loadBudgets = async () => {
     try {
-      const r = await fetch('/api/nfa-tracker/' + local.id, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-        body: JSON.stringify(data),
+      const r = await fetch('/api/budgets', { headers: authH() });
+      if (r.ok) {
+        const data = await r.json();
+        const unique = data.filter((b, i, a) => a.findIndex(x => x.id === b.id) === i);
+        if (unique.length) setActiveBudget(unique[0]);
+      }
+    } catch {}
+  };
+
+  const loadHeads = async (budgetId) => {
+    if (!budgetId) return;
+    try {
+      const r = await fetch(`/api/expense-heads?budgetId=${budgetId}`, { headers: authH() });
+      if (r.ok) setExpenseHeads(await r.json());
+    } catch {}
+  };
+
+  const load = async () => {
+    try {
+      const r = await fetch('/api/nfa-tracker', { headers: authH() });
+      if (r.ok) setList(await r.json());
+    } catch {}
+  };
+
+  useEffect(() => {
+    Promise.all([loadBudgets(), load()]).finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (activeBudget) loadHeads(activeBudget.id);
+  }, [activeBudget?.id]);
+
+  const resetForm = () => {
+    setExpenseHeadId(''); setExpenseItemId(''); setTaskId('');
+    setNfaNumber(''); setTitle(''); setDescription(''); setAmount('');
+    setPdfUrl(null); setPdfName(''); setError('');
+  };
+
+  /* ── PDF Upload with backend parsing ──────────────────── */
+  const handleUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!expenseHeadId) { setError('Please select an Expense Head first'); return; }
+
+    setUploading(true);
+    setError('');
+    try {
+      const form = new FormData();
+      form.append('file',          file);
+      form.append('expenseHeadId', expenseHeadId);
+      if (expenseItemId) form.append('expenseItemId', expenseItemId);
+      if (taskId)        form.append('taskId',        taskId);
+
+      // authH() only — NO Content-Type, browser sets multipart boundary
+      const r = await fetch('/api/nfa-tracker/upload', {
+        method: 'POST',
+        headers: authH(),
+        body: form,
       });
-      const updated = r.ok ? await r.json() : { ...local, ...data };
-      setLocal(updated);
-      onUpdated(updated);
-    } catch {
-      const updated = { ...local, ...data };
-      setLocal(updated);
-      onUpdated(updated);
+
+      if (r.ok) {
+        const data = await r.json();
+        setPreview({
+          ...data.preview,
+          fileUrl:      data.fileUrl,
+          fileName:     data.fileName,
+          expenseHeadId,
+          expenseItemId,
+          taskId,
+        });
+        setPreviewOpen(true);
+        setUploadOpen(false);
+        if (fileRef.current) fileRef.current.value = '';
+      } else {
+        const d = await r.json().catch(() => ({ error: r.statusText }));
+        setError(d.error || 'Upload failed');
+      }
+    } catch (err) {
+      setError(err.message || 'Upload failed');
+    }
+    setUploading(false);
+  };
+
+  /* ── Confirm preview and save ─────────────────────────────
+     FIX: use FormData not JSON so multer parses it correctly
+     and pdfUrl (potentially large) never goes through express.json()
+  ─────────────────────────────────────────────────────────── */
+  const handleConfirmPreview = async () => {
+    if (!preview) return;
+    setSaving(true);
+    setError('');
+    try {
+      const fd = new FormData();
+      fd.append('expenseHeadId', preview.expenseHeadId || '');
+      if (preview.expenseItemId) fd.append('expenseItemId', preview.expenseItemId);
+      if (preview.taskId)        fd.append('taskId',        preview.taskId);
+      fd.append('nfaNumber',   preview.nfaNumber   || '');
+      fd.append('title',       preview.title       || '');
+      fd.append('description', preview.description || '');
+      fd.append('amount',      String(preview.amount ? parseFloat(preview.amount) : 0));
+      if (preview.fileUrl)  fd.append('pdfUrl',  preview.fileUrl);
+      if (preview.fileName) fd.append('pdfName', preview.fileName);
+
+      // authH() only — NO Content-Type, browser sets multipart boundary
+      const r = await fetch('/api/nfa-tracker', {
+        method:  'POST',
+        headers: authH(),
+        body:    fd,
+      });
+      const data = await r.json().catch(() => ({ error: r.statusText }));
+      if (!r.ok) throw new Error(data.error || data.errors?.[0]?.msg || `Error ${r.status}`);
+      setPreviewOpen(false);
+      setPreview(null);
+      resetForm();
+      load();
+    } catch (e) {
+      setError(e.message);
     }
     setSaving(false);
   };
 
-  const patchBudget = async (projectId, amount) => {
-    if (!projectId) return;
-    const token = localStorage.getItem('token') || '';
-    await fetch('/api/budgets/' + projectId, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-      body: JSON.stringify({ nfaApproved: amount, nfaApprovedStatus: 'approved' }),
-    }).catch(() => {});
-  };
-
-  const handleToggleRaised = () => {
-    const next = !local.nfaRaised;
-    applyPatch(next
-      ? { nfaRaised: true }
-      : { nfaRaised: false, nfaApproved: false, pdfUrl: null, approvedAmount: null });
-  };
-
-  const handleToggleApproved = () => {
-    if (!local.nfaRaised) return;
-    applyPatch({ nfaApproved: !local.nfaApproved });
-  };
-
-  const handleFile = async (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    setAiLoading(true);
-    setAiMsg('Uploading PDF...');
-
-    let url = URL.createObjectURL(file);
-    const token = localStorage.getItem('token') || '';
+  /* ── Create (manual entry) ────────────────────────────────
+     FIX: use FormData not JSON — same reason as above
+  ─────────────────────────────────────────────────────────── */
+  const handleCreate = async () => {
+    if (!expenseHeadId || !nfaNumber || !title) {
+      setError('Expense Head, NFA Number and Title are required.');
+      return;
+    }
+    setSaving(true);
+    setError('');
     try {
-      const form = new FormData();
-      form.append('file', file);
-      form.append('approvalId', local.id);
-      const r = await fetch('/api/nfa-tracker/upload', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer ' + token },
-        body: form,
+      const fd = new FormData();
+      fd.append('expenseHeadId', expenseHeadId);
+      if (expenseItemId) fd.append('expenseItemId', expenseItemId);
+      if (taskId)        fd.append('taskId',        taskId);
+      fd.append('nfaNumber',   nfaNumber);
+      fd.append('title',       title);
+      fd.append('description', description || '');
+      fd.append('amount',      String(parseFloat(amount) || 0));
+      if (pdfUrl)  fd.append('pdfUrl',  pdfUrl);
+      if (pdfName) fd.append('pdfName', pdfName);
+
+      // authH() only — NO Content-Type, browser sets multipart boundary
+      const r = await fetch('/api/nfa-tracker', {
+        method:  'POST',
+        headers: authH(),
+        body:    fd,
       });
-      if (r.ok) {
-        const d = await r.json();
-        url = d.url || d.fileUrl || url;
-      }
-    } catch { /* use object URL fallback */ }
+      const data = await r.json().catch(() => ({ error: r.statusText }));
+      if (!r.ok) throw new Error(data.error || data.errors?.[0]?.msg || `Error ${r.status}`);
+      setAddOpen(false);
+      resetForm();
+      load();
+    } catch (e) {
+      setError(e.message);
+    }
+    setSaving(false);
+  };
 
-    setAiMsg('Reading PDF with AI...');
-
-    const rawText = await new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const bin = ev.target.result || '';
-        const matches = bin.match(/\(([^)\\]{2,120})\)/g) || [];
-        const text = matches.map((m) => m.slice(1, -1)).join(' ');
-        resolve(text.length > 50 ? text : bin.slice(0, 5000));
-      };
-      reader.readAsBinaryString(file);
-    });
-
-    let extractedAmount = null;
+  /* ── Edit — JSON is fine here, no file involved ─────────── */
+  const handleEditSave = async () => {
+    if (!editTarget) return;
+    setSaving(true);
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const r = await fetch(`/api/nfa-tracker/${editTarget.id}`, {
+        method:  'PATCH',
+        headers: hj(),
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 200,
-          messages: [{
-            role: 'user',
-            content: 'Extract the approved NFA/budget amount in INR from this document. Return ONLY valid JSON with no markdown: {"amount": <number or null>}\n\n' + rawText.slice(0, 4000),
-          }],
+          nfaNumber:   editTarget.nfaNumber,
+          title:       editTarget.title,
+          description: editTarget.description,
+          amount:      parseFloat(editTarget.amount) || 0,
         }),
       });
-      const d = await res.json();
-      const txt = (d.content && d.content[0] && d.content[0].text) || '{}';
-      const parsed = JSON.parse(txt.replace(/```json|```/g, '').trim());
-      extractedAmount = parsed.amount || null;
-    } catch { /* AI failed */ }
-
-    const updates = { pdfUrl: url, pdfName: file.name };
-    if (extractedAmount) {
-      updates.approvedAmount = extractedAmount;
-      setAiMsg('AI extracted: ' + fmt(extractedAmount) + ' — populated to linked budget.');
-      await patchBudget(local.linkedProjectId, extractedAmount);
-    } else {
-      setAiMsg('AI could not find an amount. Enter it manually below.');
-    }
-    await applyPatch(updates);
-    setAiLoading(false);
-    if (fileRef.current) fileRef.current.value = '';
+      if (r.ok) { setEditTarget(null); load(); }
+    } catch {}
+    setSaving(false);
   };
 
-  const handleManualAmount = async () => {
-    const val = parseFloat(manualAmt);
-    if (!val) return;
-    await applyPatch({ approvedAmount: val });
-    await patchBudget(local.linkedProjectId, val);
-    setManualAmt('');
-    setAiMsg(fmt(val) + ' saved and populated to budget.');
+  /* ── Approve / Reject — JSON is fine, no file ────────────── */
+  const handleApprove = async (id, reject) => {
+    try {
+      await fetch(`/api/nfa-tracker/${id}/approve`, {
+        method:  'POST',
+        headers: hj(),
+        body:    JSON.stringify({ reject: !!reject }),
+      });
+      load();
+    } catch {}
   };
+
+  /* ── Delete ──────────────────────────────────────────────── */
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      const r = await fetch(`/api/nfa-tracker/${deleteTarget.id}`, {
+        method:  'DELETE',
+        headers: authH(),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setError(d.error || 'Delete failed'); setDeleteTarget(null); return; }
+      setDeleteTarget(null);
+      load();
+    } catch {}
+  };
+
+  /* ── Download all ────────────────────────────────────────── */
+  const downloadAll = () => {
+    list.filter(n => n.pdfUrl).forEach(n => {
+      const a = document.createElement('a');
+      a.href     = n.pdfUrl;
+      a.download = n.pdfName || `NFA_${n.nfaNumber}.pdf`;
+      a.click();
+    });
+  };
+
+  const headName = id => expenseHeads.find(h => h.id === id)?.name || id || '—';
+
+  if (loading) return <div className="spinner-wrap"><div className="spinner" /></div>;
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle sx={{ pb: 0.5 }}>
-        <Typography variant="h6" fontWeight={700}>{local.title}</Typography>
-        {linkedProject && (
-          <Typography variant="caption" color="primary.main" fontWeight={600}>
-            Project: {linkedProject.name}
-          </Typography>
-        )}
-      </DialogTitle>
-
-      <DialogContent>
-        {saving && <LinearProgress sx={{ mb: 1.5 }} />}
-
-        {local.description && (
-          <Typography variant="body2" color="text.secondary" mb={1.5}>
-            {local.description}
-          </Typography>
-        )}
-        {local.amount > 0 && (
-          <Typography variant="body2" mb={2}>
-            Requested Amount: <b>{fmt(local.amount)}</b>
-          </Typography>
-        )}
-
-        <Divider sx={{ mb: 2 }} />
-
-        <Typography variant="caption" fontWeight={700} color="text.secondary"
-          sx={{ textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', mb: 1.5 }}>
-          NFA Workflow
-        </Typography>
-
-        {/* Step 1 */}
-        <TickButton
-          done={local.nfaRaised}
-          label="NFA Raised — submitted in external portal"
-          onClick={handleToggleRaised}
-        />
-        <StepLine done={local.nfaRaised} />
-
-        {/* Step 2 */}
-        <TickButton
-          done={local.nfaApproved}
-          label="NFA Approved by authority"
-          onClick={handleToggleApproved}
-          disabled={!local.nfaRaised}
-        />
-        <StepLine done={local.nfaApproved} />
-
-        {/* Step 3 — Upload PDF */}
-        <Box sx={{
-          p: 1.5, borderRadius: 2, border: '1.5px solid', transition: 'all 0.2s',
-          borderColor: local.pdfUrl ? '#6EE7B7' : local.nfaApproved ? '#C7D2FE' : '#E2E8F0',
-          bgcolor:     local.pdfUrl ? '#F0FDF4' : local.nfaApproved ? '#EEF2FF' : '#F8FAFC',
-          opacity: local.nfaApproved ? 1 : 0.5,
-        }}>
-          <Typography variant="body2" fontWeight={600} mb={1.2}
-            color={local.pdfUrl ? '#065F46' : local.nfaApproved ? '#3730A3' : '#94A3B8'}>
-            {local.pdfUrl
-              ? ('Uploaded: ' + (local.pdfName || 'Approved NFA PDF'))
-              : 'Upload Approved NFA Softcopy (PDF)'}
-          </Typography>
-
-          <Box display="flex" gap={1} flexWrap="wrap">
-            <Button
-              size="small"
-              variant={local.pdfUrl ? 'outlined' : 'contained'}
-              startIcon={<UploadFileIcon />}
-              disabled={!local.nfaApproved || aiLoading}
-              onClick={() => fileRef.current && fileRef.current.click()}
-            >
-              {local.pdfUrl ? 'Replace PDF' : 'Upload PDF'}
-            </Button>
-            {local.pdfUrl && (
-              <Button
-                size="small" variant="outlined" color="success"
-                startIcon={<DownloadIcon />}
-                component="a" href={local.pdfUrl}
-                target="_blank" rel="noopener noreferrer"
-                download={local.pdfName || 'NFA_Approved.pdf'}
-              >
-                Download PDF
-              </Button>
-            )}
-          </Box>
-
-          <input
-            ref={fileRef} type="file" accept="application/pdf"
-            style={{ display: 'none' }} onChange={handleFile}
-          />
-
-          {aiLoading && (
-            <Box mt={1.5}>
-              <LinearProgress />
-              <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
-                <AutoAwesomeIcon sx={{ fontSize: 12, mr: 0.4, verticalAlign: 'middle' }} />
-                {aiMsg}
-              </Typography>
-            </Box>
-          )}
-
-          {(!aiLoading && aiMsg) && (
-            <Alert severity={aiMsg.startsWith('AI could') ? 'info' : 'success'}
-              sx={{ mt: 1.5, py: 0.3, fontSize: 12 }}>
-              {aiMsg}
-            </Alert>
-          )}
-
-          {local.nfaApproved && (
-            <Box mt={1.5}>
-              {local.approvedAmount ? (
-                <Typography variant="body2">
-                  Approved Amount:{' '}
-                  <b style={{ color: '#10B981' }}>{fmt(local.approvedAmount)}</b>
-                  <Typography component="span" variant="caption" color="text.secondary" ml={1}>
-                    (populated to budget)
-                  </Typography>
-                </Typography>
-              ) : (
-                <Box display="flex" alignItems="center" gap={1} mt={0.5}>
-                  <TextField
-                    size="small" type="number" label="Approved amount (Rs.)"
-                    inputProps={{ min: 0, step: 0.01 }}
-                    sx={{ width: 200 }}
-                    value={manualAmt}
-                    onChange={(e) => setManualAmt(e.target.value)}
-                  />
-                  <Button size="small" variant="outlined"
-                    disabled={!manualAmt} onClick={handleManualAmount}>
-                    Save & Populate
-                  </Button>
-                </Box>
-              )}
-            </Box>
-          )}
-        </Box>
-
-        {/* Original comments — preserved */}
-        {(local.comments || []).length > 0 && (
-          <Box mt={2.5}>
-            <Typography variant="subtitle2" mb={1}>Comments</Typography>
-            {local.comments.map((c, i) => (
-              <Box key={i} sx={{ py: 1, borderBottom: 1, borderColor: 'divider' }}>
-                <Typography variant="body2">{c.text}</Typography>
-                <Typography variant="caption" color="textSecondary">
-                  {c.by} · {c.at && c.at.seconds ? new Date(c.at.seconds * 1000).toLocaleString() : ''}
-                </Typography>
-              </Box>
-            ))}
-          </Box>
-        )}
-
-        {/* Original submit/approve/reject buttons — preserved */}
-        <Box sx={{ mt: 2.5, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-          {local.status === 'Draft' && canCreate && (
-            <Button startIcon={<SendIcon />} variant="contained"
-              onClick={() => onSubmit(local.id)}>
-              Submit for Approval
-            </Button>
-          )}
-          {(local.status === 'Submitted' || local.status === 'Pending') && canApprove && (
+    <div className="page">
+      <div className="page-header">
+        <h1 className="page-title">NFA Tracker</h1>
+        <div className="btn-row">
+          <button className="btn btn-ghost btn-sm" onClick={downloadAll}>↓ Download All</button>
+          {canEdit && (
             <>
-              <TextField size="small" placeholder="Comment"
-                value={approveComment} onChange={(e) => setApproveComment(e.target.value)} />
-              <Button startIcon={<CheckIcon />} variant="contained" color="success"
-                onClick={() => onApprove(local.id, false)}>
-                Approve
-              </Button>
-              <Button startIcon={<CloseIcon />} variant="outlined" color="error"
-                onClick={() => onApprove(local.id, true)}>
-                Reject
-              </Button>
+              <button className="btn btn-outline btn-sm" onClick={() => setUploadOpen(true)}>↑ Upload PDF</button>
+              <button className="btn btn-primary" onClick={() => { setAddOpen(true); resetForm(); }}>+ New NFA</button>
             </>
           )}
-          <Button onClick={onClose}>Close</Button>
-        </Box>
-      </DialogContent>
-    </Dialog>
-  );
-}
+        </div>
+      </div>
 
-/* ══════════════════════════════════════════════════════════════
-   MAIN PAGE — all original state names preserved exactly
-══════════════════════════════════════════════════════════════ */
-export default function NFATracker() {
-  const [list,            setList]            = useState([]);
-  const [loading,         setLoading]         = useState(true);
-  const [open,            setOpen]            = useState(false);
-  const [detailOpen,      setDetailOpen]      = useState(null);
-  const [title,           setTitle]           = useState('');
-  const [description,     setDescription]     = useState('');
-  const [amount,          setAmount]          = useState('');
-  const [approveComment,  setApproveComment]  = useState('');
-  const [rejecting,       setRejecting]       = useState(false);   // original
-  const [projects,        setProjects]        = useState([]);
-  const [linkedProjectId, setLinkedProjectId] = useState('');
-
-  const { user } = useAuth();
-  const canCreate  = ['Admin', 'Requestor'].includes(user && user.role);
-  const canApprove = ['Admin', 'Approver'].includes(user && user.role);
-
-  const load = () => api.nfaTracker.list().then(setList);
-
-  useEffect(() => {
-    load();
-    setLoading(false);
-    api.budgets.list()
-      .then((d) => setProjects(Array.isArray(d) ? d : []))
-      .catch(() => {});
-  }, []);
-
-  const handleCreate = async (e) => {
-    e.preventDefault();
-    await api.nfaTracker.create({
-      title,
-      description,
-      amount: amount ? parseFloat(amount) : undefined,
-      linkedProjectId: linkedProjectId || undefined,
-    });
-    setOpen(false);
-    setTitle(''); setDescription(''); setAmount(''); setLinkedProjectId('');
-    load();
-  };
-
-  const handleSubmit = async (id) => {
-    await api.nfaTracker.submit(id);
-    setDetailOpen(null);
-    load();
-  };
-
-  const handleApprove = async (id, reject) => {
-    await api.nfaTracker.approve(id, { comment: approveComment, reject: !!reject });
-    setDetailOpen(null);
-    setApproveComment('');
-    setRejecting(false);
-    load();
-  };
-
-  const handleUpdated = (updated) => {
-    setList((prev) => prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a)));
-  };
-
-  if (loading) {
-    return <Box display="flex" justifyContent="center" p={4}><CircularProgress /></Box>;
-  }
-
-  const selected = detailOpen != null ? list.find((a) => a.id === detailOpen) : null;
-
-  return (
-    <Box>
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
-        <Typography variant="h5">NFA Tracker</Typography>
-        {canCreate && (
-          <Button startIcon={<AddIcon />} variant="contained" onClick={() => setOpen(true)}>
-            New NFA
-          </Button>
-        )}
-      </Box>
-
-      <Card>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableCell>Project</TableCell>
-              <TableCell>Title</TableCell>
-              <TableCell align="center">NFA Raised</TableCell>
-              <TableCell align="center">NFA Approved</TableCell>
-              <TableCell align="right">Approved Amount</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell>Created By</TableCell>
-              <TableCell align="right">Actions</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {list.map((a) => {
-              const proj = projects.find((p) => p.id === a.linkedProjectId);
-              return (
-                <TableRow key={a.id} hover>
-                  <TableCell>
-                    {proj
-                      ? <Typography variant="body2" fontWeight={600}>{proj.name}</Typography>
-                      : <Typography variant="body2" color="text.disabled">—</Typography>}
-                  </TableCell>
-
-                  <TableCell>{a.title}</TableCell>
-
-                  <TableCell align="center">
-                    <Chip
-                      label={a.nfaRaised ? 'Yes' : 'No'}
-                      size="small"
-                      sx={{
-                        fontWeight: 700, fontSize: 11, height: 22,
-                        bgcolor: a.nfaRaised ? '#D1FAE5' : '#FEE2E2',
-                        color:   a.nfaRaised ? '#065F46' : '#991B1B',
-                        border:  '1px solid ' + (a.nfaRaised ? '#6EE7B7' : '#FCA5A5'),
-                        '& .MuiChip-label': { px: 1 },
-                      }}
-                    />
-                  </TableCell>
-
-                  <TableCell align="center">
-                    {!a.nfaRaised ? (
-                      <Typography variant="caption" color="text.disabled">—</Typography>
-                    ) : (
-                      <Chip
-                        label={a.nfaApproved ? 'Approved' : 'Pending'}
-                        size="small"
-                        sx={{
-                          fontWeight: 700, fontSize: 11, height: 22,
-                          bgcolor: a.nfaApproved ? '#D1FAE5' : '#FEF3C7',
-                          color:   a.nfaApproved ? '#065F46' : '#92400E',
-                          border:  '1px solid ' + (a.nfaApproved ? '#6EE7B7' : '#FCD34D'),
-                          '& .MuiChip-label': { px: 1 },
-                        }}
-                      />
-                    )}
-                  </TableCell>
-
-                  <TableCell align="right">
-                    {a.approvedAmount
-                      ? <Typography variant="body2" fontWeight={700} color="success.main">{fmt(a.approvedAmount)}</Typography>
-                      : <Typography variant="body2" color="text.disabled">—</Typography>}
-                  </TableCell>
-
-                  <TableCell><StatusChip a={a} /></TableCell>
-
-                  <TableCell>{a.createdByName || '—'}</TableCell>
-
-                  <TableCell align="right">
-                    <Button size="small" onClick={() => setDetailOpen(a.id)}>Manage</Button>
-                    {a.pdfUrl && (
-                      <Button
-                        size="small" color="success" sx={{ ml: 0.5 }}
-                        component="a" href={a.pdfUrl} target="_blank"
-                        rel="noopener noreferrer"
-                        download={a.pdfName || 'NFA_Approved.pdf'}
-                      >
-                        PDF
-                      </Button>
-                    )}
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-            {list.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={8} align="center" sx={{ color: 'text.secondary', py: 4 }}>
-                  No NFAs yet. Click "New NFA" to create one.
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </Card>
-
-      {/* Create dialog */}
-      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>New NFA</DialogTitle>
-        <DialogContent>
-          <form onSubmit={handleCreate}>
-            <FormControl fullWidth margin="normal" required>
-              <InputLabel>Select Project *</InputLabel>
-              <Select
-                value={linkedProjectId}
-                label="Select Project *"
-                onChange={(e) => setLinkedProjectId(e.target.value)}
-              >
-                <MenuItem value=""><em>— Choose a project —</em></MenuItem>
-                {projects.map((p) => (
-                  <MenuItem key={p.id} value={p.id}>
-                    <Box>
-                      <Typography variant="body2" fontWeight={600}>{p.name}</Typography>
-                      {p.businessUnit && (
-                        <Typography variant="caption" color="text.secondary">{p.businessUnit}</Typography>
-                      )}
-                    </Box>
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            <TextField fullWidth label="NFA Title" value={title}
-              onChange={(e) => setTitle(e.target.value)} margin="normal" required />
-            <TextField fullWidth label="Description" value={description}
-              onChange={(e) => setDescription(e.target.value)} margin="normal" multiline />
-            <TextField fullWidth type="number" inputProps={{ min: 0, step: 0.01 }}
-              label="Requested Amount (Rs.)" value={amount}
-              onChange={(e) => setAmount(e.target.value)} margin="normal" />
-
-            <Box sx={{ mt: 2, display: 'flex', gap: 1 }}>
-              <Button type="submit" variant="contained"
-                disabled={!linkedProjectId || !title}>
-                Create NFA
-              </Button>
-              <Button onClick={() => setOpen(false)}>Cancel</Button>
-            </Box>
-          </form>
-        </DialogContent>
-      </Dialog>
-
-      {/* Workflow dialog */}
-      {selected && (
-        <NFAWorkflowDialog
-          nfa={selected}
-          projects={projects}
-          open={Boolean(selected)}
-          onClose={() => setDetailOpen(null)}
-          onUpdated={handleUpdated}
-          canApprove={canApprove}
-          canCreate={canCreate}
-          approveComment={approveComment}
-          setApproveComment={setApproveComment}
-          onApprove={handleApprove}
-          onSubmit={handleSubmit}
-        />
+      {error && (
+        <div className="alert alert-error" style={{ marginBottom: 12 }}>
+          {error}
+          <button onClick={() => setError('')} style={{ float: 'right', background: 'none', border: 'none', cursor: 'pointer' }}>✕</button>
+        </div>
       )}
-    </Box>
+
+      {/* Summary cards */}
+      <div className="cards-row">
+        {[
+          { label: 'Total NFAs',      value: list.length,                                                                         color: '#4F6EF7' },
+          { label: 'Approved',        value: list.filter(n => n.status === 'Approved').length,                                    color: '#10B981' },
+          { label: 'Pending',         value: list.filter(n => n.status === 'Submitted' || n.status === 'Pending').length,         color: '#F59E0B' },
+          { label: 'Approved Amount', value: fmt(list.reduce((s, n) => s + (n.approvedAmount || 0), 0)),                         color: '#8B5CF6' },
+        ].map(s => (
+          <div key={s.label} className="card">
+            <div className="card-label">{s.label}</div>
+            <div className="card-value" style={{ color: s.color }}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Table */}
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>NFA Number</th>
+              <th>Title</th>
+              <th>Expense Head</th>
+              <th>Amount</th>
+              <th>Approved Amt</th>
+              <th>Status</th>
+              <th style={{ textAlign: 'right' }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map(n => (
+              <tr key={n.id}>
+                <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#4F6EF7' }}>{n.nfaNumber || '—'}</td>
+                <td style={{ fontSize: 13 }}>{n.title}</td>
+                <td style={{ fontSize: 12 }}>{headName(n.expenseHeadId)}</td>
+                <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmt(n.amount)}</td>
+                <td style={{ textAlign: 'right', fontWeight: 700, color: '#10B981' }}>
+                  {n.approvedAmount ? fmt(n.approvedAmount) : <span style={{ color: '#CBD5E1' }}>—</span>}
+                </td>
+                <td>
+                  <span className="chip" style={{
+                    background: n.status === 'Approved'  ? '#D1FAE5'
+                              : n.status === 'Rejected'  ? '#FEE2E2'
+                              : (n.status === 'Submitted' || n.status === 'Pending') ? '#FEF3C7'
+                              : '#F1F5F9',
+                    color: n.status === 'Approved'  ? '#065F46'
+                         : n.status === 'Rejected'  ? '#991B1B'
+                         : (n.status === 'Submitted' || n.status === 'Pending') ? '#92400E'
+                         : '#475569',
+                  }}>{n.status || 'Draft'}</span>
+                </td>
+                <td style={{ textAlign: 'right' }}>
+                  <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end', alignItems: 'center' }}>
+                    {canApprove && (n.status === 'Submitted' || n.status === 'Pending') && (
+                      <>
+                        <button className="btn btn-success btn-xs" onClick={() => handleApprove(n.id, false)}>✔ Approve</button>
+                        <button className="btn btn-danger  btn-xs" onClick={() => handleApprove(n.id, true)}>✕ Reject</button>
+                      </>
+                    )}
+                    <button className="btn-icon" onClick={() => setEditTarget({ ...n })} title="Edit">✏</button>
+                    {n.pdfUrl && <a className="btn-icon" href={n.pdfUrl} download={n.pdfName || 'NFA.pdf'} title="Download">↓</a>}
+                    {canEdit && <button className="btn-icon red" onClick={() => setDeleteTarget(n)} title="Delete">🗑</button>}
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {list.length === 0 && (
+              <tr><td colSpan={7} style={{ textAlign: 'center', padding: '40px', color: '#94A3B8' }}>
+                No NFAs yet. Click "+ New NFA" to create one.
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* ── Upload Modal ── */}
+      <Modal open={uploadOpen} onClose={() => setUploadOpen(false)} title="Upload NFA PDF" large
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={() => setUploadOpen(false)}>Cancel</button>
+          <button className="btn btn-primary btn-sm"
+            disabled={!expenseHeadId || uploading || !fileRef.current?.files?.[0]}
+            onClick={() => handleUpload({ target: { files: fileRef.current?.files } })}>
+            {uploading ? 'Uploading & Parsing…' : 'Upload & Parse'}
+          </button>
+        </>}>
+        {error && <div className="alert alert-error">{error}</div>}
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: '#1A1D23' }}>Step 1: Select Hierarchy</div>
+          <HierarchySelectors
+            expenseHeadId={expenseHeadId} setExpenseHeadId={setExpenseHeadId}
+            expenseItemId={expenseItemId} setExpenseItemId={setExpenseItemId}
+            taskId={taskId} setTaskId={setTaskId}
+            expenseHeads={expenseHeads}
+          />
+        </div>
+
+        <div style={{ padding: '12px 14px', background: expenseHeadId ? '#F8FAFF' : '#F1F5F9', borderRadius: 8, border: '1.5px solid #E2E8F0', opacity: expenseHeadId ? 1 : 0.6 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: expenseHeadId ? '#1A1D23' : '#94A3B8' }}>Step 2: Upload PDF</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button className="btn btn-outline btn-sm" disabled={!expenseHeadId || uploading}
+              onClick={() => fileRef.current?.click()}>
+              {uploading ? 'Processing…' : pdfUrl ? '↑ Replace PDF' : '↑ Choose PDF'}
+            </button>
+            {fileRef.current?.files?.[0] && (
+              <span style={{ fontSize: 12, color: '#10B981', fontWeight: 600 }}>✔ {fileRef.current.files[0].name}</span>
+            )}
+          </div>
+          {!expenseHeadId && <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 8 }}>Select an Expense Head above to enable upload</div>}
+          <input ref={fileRef} type="file" accept="application/pdf" style={{ display: 'none' }}
+            onChange={e => handleUpload(e)} />
+        </div>
+      </Modal>
+
+      {/* ── Preview Modal ── */}
+      <Modal open={previewOpen} onClose={() => setPreviewOpen(false)} title="Review Parsed NFA" large
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={() => { setPreviewOpen(false); setPreview(null); }}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleConfirmPreview}
+            disabled={saving || !preview?.nfaNumber || !preview?.title}>
+            {saving ? 'Saving…' : 'Confirm & Save'}
+          </button>
+        </>}>
+        {preview && (
+          <>
+            <div className="alert alert-success" style={{ marginBottom: 14 }}>
+              ✔ PDF parsed successfully. Review and confirm the details below.
+            </div>
+            <div className="field">
+              <label>NFA Number *</label>
+              <input value={preview.nfaNumber || ''} onChange={e => setPreview({ ...preview, nfaNumber: e.target.value })} required />
+            </div>
+            <div className="field">
+              <label>Title *</label>
+              <input value={preview.title || ''} onChange={e => setPreview({ ...preview, title: e.target.value })} required />
+            </div>
+            <div className="field">
+              <label>Description</label>
+              <textarea value={preview.description || ''} onChange={e => setPreview({ ...preview, description: e.target.value })} rows={3} />
+            </div>
+            <div className="field">
+              <label>Requested Amount (₹)</label>
+              <input type="number" min={0} step={0.01} value={preview.amount || ''}
+                onChange={e => setPreview({ ...preview, amount: e.target.value })} />
+            </div>
+          </>
+        )}
+      </Modal>
+
+      {/* ── Add Modal ── */}
+      <Modal open={addOpen} onClose={() => { setAddOpen(false); resetForm(); }} title="New NFA" large
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={() => { setAddOpen(false); resetForm(); }}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleCreate}
+            disabled={saving || !expenseHeadId || !nfaNumber || !title}>
+            {saving ? 'Creating…' : 'Create NFA'}
+          </button>
+        </>}>
+        {error && <div className="alert alert-error">{error}</div>}
+        <HierarchySelectors
+          expenseHeadId={expenseHeadId} setExpenseHeadId={setExpenseHeadId}
+          expenseItemId={expenseItemId} setExpenseItemId={setExpenseItemId}
+          taskId={taskId} setTaskId={setTaskId}
+          expenseHeads={expenseHeads}
+        />
+        <div className="field"><label>NFA Number *</label><input value={nfaNumber} onChange={e => setNfaNumber(e.target.value)} placeholder="e.g. NFA/2026/001" /></div>
+        <div className="field"><label>Title *</label><input value={title} onChange={e => setTitle(e.target.value)} placeholder="Brief description of request" /></div>
+        <div className="field"><label>Description</label><textarea value={description} onChange={e => setDescription(e.target.value)} /></div>
+        <div className="field"><label>Requested Amount (₹)</label><input type="number" min={0} step={0.01} value={amount} onChange={e => setAmount(e.target.value)} /></div>
+      </Modal>
+
+      {/* ── Edit Modal ── */}
+      <Modal open={!!editTarget} onClose={() => setEditTarget(null)} title="Edit NFA" small
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={() => setEditTarget(null)}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleEditSave} disabled={saving}>Save</button>
+        </>}>
+        {editTarget && <>
+          <div className="field"><label>NFA Number</label><input value={editTarget.nfaNumber || ''} onChange={e => setEditTarget(t => ({ ...t, nfaNumber: e.target.value }))} /></div>
+          <div className="field"><label>Title</label><input value={editTarget.title || ''} onChange={e => setEditTarget(t => ({ ...t, title: e.target.value }))} /></div>
+          <div className="field"><label>Description</label><textarea value={editTarget.description || ''} onChange={e => setEditTarget(t => ({ ...t, description: e.target.value }))} /></div>
+          <div className="field"><label>Amount (₹)</label><input type="number" min={0} value={editTarget.amount || ''} onChange={e => setEditTarget(t => ({ ...t, amount: e.target.value }))} /></div>
+        </>}
+      </Modal>
+
+      {/* ── Delete Modal ── */}
+      <Modal open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Delete NFA?" small
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={() => setDeleteTarget(null)}>Cancel</button>
+          <button className="btn btn-danger btn-sm" onClick={handleDelete}>Delete</button>
+        </>}>
+        <p style={{ margin: 0, fontSize: 13 }}>Delete NFA <strong>{deleteTarget?.nfaNumber}</strong>? This cannot be undone.</p>
+        {error && <div className="alert alert-error" style={{ marginTop: 8 }}>{error}</div>}
+      </Modal>
+    </div>
   );
 }

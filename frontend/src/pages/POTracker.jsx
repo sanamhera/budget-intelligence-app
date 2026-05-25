@@ -1,423 +1,395 @@
+/**
+ * pages/POTracker.jsx — Zero MUI
+ * PO REQUIRES an Approved NFA (enforced frontend + backend)
+ * Hierarchy: Expense Head → fetch Approved NFAs → create PO
+ */
 import { useState, useEffect, useRef } from 'react';
-import {
-  Box, Button, Card, Table, TableBody, TableCell, TableHead, TableRow,
-  Typography, Dialog, DialogTitle, DialogContent, DialogActions,
-  TextField, Chip, CircularProgress, MenuItem, Select, InputLabel,
-  FormControl, Collapse, IconButton, InputAdornment, Tooltip,
-  Divider, Alert,
-} from '@mui/material';
-import AddIcon               from '@mui/icons-material/Add';
-import SearchIcon            from '@mui/icons-material/Search';
-import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
-import KeyboardArrowUpIcon   from '@mui/icons-material/KeyboardArrowUp';
-import UploadFileIcon        from '@mui/icons-material/UploadFile';
-import DownloadIcon          from '@mui/icons-material/Download';
 import { useAuth } from '../context/AuthContext';
+import './app.css';
 
-const fmt = v => `₹${Number(v || 0).toLocaleString('en-IN')}`;
+const fmt   = v => `₹${Number(v||0).toLocaleString('en-IN')}`;
+const tkn   = () => localStorage.getItem('token') || '';
+const hj    = () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${tkn()}` });
+const authH = () => ({ Authorization: `Bearer ${tkn()}` });
 
-/* ── Status chip ─────────────────────────────────────────────── */
-function POStatusChip({ status }) {
-  const map = {
-    open:      { label: 'Open',      bgcolor: '#D1FAE5', color: '#065F46', border: '#6EE7B7' },
-    closed:    { label: 'Closed',    bgcolor: '#F1F5F9', color: '#475569', border: '#CBD5E1' },
-    cancelled: { label: 'Cancelled', bgcolor: '#FEE2E2', color: '#991B1B', border: '#FCA5A5' },
-    partial:   { label: 'Partial',   bgcolor: '#FEF3C7', color: '#92400E', border: '#FCD34D' },
-  };
-  const s = map[status] || map.open;
-  return <Chip label={s.label} size="small"
-    sx={{ height: 22, fontSize: 11, fontWeight: 700, bgcolor: s.bgcolor, color: s.color,
-      border: `1px solid ${s.border}`, '& .MuiChip-label': { px: 1.2 } }} />;
-}
+const PO_STATUSES = ['Draft','Issued','Partially Invoiced','Fully Invoiced','Closed','Cancelled'];
 
-/* ── Invoice row inside expanded PO ─────────────────────────── */
-function InvoiceRow({ inv }) {
+function Modal({ open, onClose, title, children, footer, large }) {
+  if (!open) return null;
   return (
-    <Box display="flex" alignItems="center" gap={1.5} py={0.6}
-      sx={{ borderBottom: '1px dashed #E2E8F0', '&:last-child': { borderBottom: 'none' } }}>
-      <Box flex={1}>
-        <Typography variant="caption" fontWeight={700}>{inv.invoiceNumber || 'Invoice'}</Typography>
-        {inv.vendor && <Typography variant="caption" color="text.secondary"> — {inv.vendor}</Typography>}
-      </Box>
-      <Typography variant="caption" color="text.secondary">{inv.date || '—'}</Typography>
-      <Typography variant="caption" fontWeight={700} color="warning.dark" sx={{ minWidth: 80, textAlign: 'right' }}>
-        {fmt(inv.amount || 0)}
-      </Typography>
-      <Chip label={inv.paid ? 'Paid' : 'Unpaid'} size="small"
-        sx={{ height: 18, fontSize: 10, fontWeight: 700,
-          bgcolor: inv.paid ? '#D1FAE5' : '#FEF3C7',
-          color: inv.paid ? '#065F46' : '#92400E' }} />
-    </Box>
+    <div className="modal-overlay" onClick={onClose}>
+      <div className={`modal${large?' modal-lg':' modal-sm'}`} onClick={e=>e.stopPropagation()}>
+        <div className="modal-header"><h2 className="modal-title">{title}</h2><button className="btn-icon" onClick={onClose}>✕</button></div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-footer">{footer}</div>}
+      </div>
+    </div>
   );
 }
 
-/* ── PO row with expand for invoices ─────────────────────────── */
-function PORow({ po, projectName, canEdit, onAddInvoice }) {
-  const [open, setOpen] = useState(false);
-  const invoices = po.invoices || [];
-  const invoicedTotal = invoices.reduce((s, i) => s + (Number(i.amount) || 0), 0);
-  const paidTotal     = invoices.filter(i => i.paid).reduce((s, i) => s + (Number(i.amount) || 0), 0);
-
-  return (
-    <>
-      <TableRow hover sx={{ '& > *': { borderBottom: 'unset' }, cursor: 'pointer' }}
-        onClick={() => setOpen(o => !o)}>
-        <TableCell padding="checkbox">
-          <IconButton size="small">{open ? <KeyboardArrowUpIcon /> : <KeyboardArrowDownIcon />}</IconButton>
-        </TableCell>
-        <TableCell>
-          <Typography variant="body2" fontFamily="monospace" fontWeight={700} color="warning.dark">
-            {po.poNumber || po.id}
-          </Typography>
-        </TableCell>
-        <TableCell>
-          <Typography variant="body2" fontWeight={600}>{projectName(po.projectId)}</Typography>
-        </TableCell>
-        <TableCell><Typography variant="body2">{po.vendor || '—'}</Typography></TableCell>
-        <TableCell align="right">
-          <Typography variant="body2" fontWeight={700}>{fmt(po.amount || 0)}</Typography>
-        </TableCell>
-        <TableCell align="right">
-          <Tooltip title="Total invoiced against this PO">
-            <Typography variant="body2" color="warning.main" fontWeight={600}>{fmt(invoicedTotal)}</Typography>
-          </Tooltip>
-        </TableCell>
-        <TableCell align="right">
-          <Typography variant="body2" color="success.main" fontWeight={600}>{fmt(paidTotal)}</Typography>
-        </TableCell>
-        <TableCell><Typography variant="caption">{po.date || '—'}</Typography></TableCell>
-        <TableCell><POStatusChip status={po.status} /></TableCell>
-        <TableCell>
-          {po.pdfUrl
-            ? <Button size="small" startIcon={<DownloadIcon />} href={po.pdfUrl} target="_blank"
-                sx={{ fontSize: 11, textTransform: 'none' }}>Download PO</Button>
-            : <Typography variant="caption" color="text.disabled">No PDF uploaded</Typography>}
-        </TableCell>
-        <TableCell>
-          <Typography variant="caption" sx={{
-            display: 'inline-block', bgcolor: '#EEF2FF', color: '#4338CA',
-            borderRadius: 1, px: 0.8, fontWeight: 700, fontSize: 10,
-          }}>
-            {invoices.length} invoice{invoices.length !== 1 ? 's' : ''}
-          </Typography>
-        </TableCell>
-      </TableRow>
-
-      {/* Expanded: invoices */}
-      <TableRow>
-        <TableCell colSpan={11} sx={{ py: 0, background: '#FAFBFF' }}>
-          <Collapse in={open} timeout="auto" unmountOnExit>
-            <Box sx={{ p: 2 }}>
-              <Box display="flex" justifyContent="space-between" alignItems="center" mb={1}>
-                <Typography variant="caption" fontWeight={700} color="text.secondary"
-                  sx={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Invoices against {po.poNumber || po.id}
-                </Typography>
-                {canEdit && (
-                  <Button size="small" startIcon={<AddIcon />}
-                    onClick={e => { e.stopPropagation(); onAddInvoice(po); }}
-                    sx={{ fontSize: 11 }}>
-                    Add Invoice
-                  </Button>
-                )}
-              </Box>
-              {invoices.length === 0
-                ? <Typography variant="caption" color="text.disabled">No invoices yet.</Typography>
-                : invoices.map((inv, i) => <InvoiceRow key={i} inv={inv} />)
-              }
-            </Box>
-          </Collapse>
-        </TableCell>
-      </TableRow>
-    </>
-  );
-}
-
-/* ══════════════════════════════════════════════════════════════
-   MAIN
-══════════════════════════════════════════════════════════════ */
 export default function POTracker() {
-  const [list,     setList]    = useState([]);
-  const [budgets,  setBudgets] = useState([]);
-  const [loading,  setLoading] = useState(true);
-  const [search,   setSearch]  = useState('');
-  const [open,     setOpen]    = useState(false);
-  const [invOpen,  setInvOpen] = useState(false);
-  const [targetPO, setTargetPO]= useState(null);
+  const { user } = useAuth();
+  const canEdit  = ['Admin','Finance','Requestor'].includes(user?.role);
+
+  const [list,         setList]         = useState([]);
+  const [expenseHeads, setExpenseHeads] = useState([]);
+  const [activeBudget, setActiveBudget] = useState(null);
+  const [loading,      setLoading]      = useState(true);
+  const [addOpen,      setAddOpen]      = useState(false);
+  const [editTarget,   setEditTarget]   = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [error,        setError]        = useState('');
+  const [saving,       setSaving]       = useState(false);
+
+  // form
+  const [expenseHeadId, setExpenseHeadId] = useState('');
+  const [approvedNFAs,  setApprovedNFAs]  = useState([]);
+  const [nfaId,         setNfaId]         = useState('');
+  const [nfaBlocked,    setNfaBlocked]    = useState(false);
+  const [vendorName,    setVendorName]    = useState('');
+  const [poNumber,      setPoNumber]      = useState('');
+  const [amount,        setAmount]        = useState('');
+  const [description,   setDescription]  = useState('');
+  const [status,        setStatus]        = useState('Draft');
+  const [pdfUrl,        setPdfUrl]        = useState(null);
+  const [pdfName,       setPdfName]       = useState('');
+  const [uploading,     setUploading]     = useState(false);
+  const [aiMsg,         setAiMsg]         = useState('');
   const fileRef = useRef(null);
 
-  /* PO form */
-  const [projectId, setProjectId] = useState('');
-  const [vendor,    setVendor]    = useState('');
-  const [poNumber,  setPoNumber]  = useState('');
-  const [amount,    setAmount]    = useState('');
-  const [date,      setDate]      = useState('');
-  const [status,    setStatus]    = useState('open');
-  const [pdfFile,   setPdfFile]   = useState(null);
-  const [pdfUrl,    setPdfUrl]    = useState('');
-  const [uploading, setUploading] = useState(false);
+  // Expanded row state
+  const [expanded, setExpanded] = useState({});
 
-  /* Invoice form */
-  const [invNumber, setInvNumber] = useState('');
-  const [invVendor, setInvVendor] = useState('');
-  const [invAmount, setInvAmount] = useState('');
-  const [invDate,   setInvDate]   = useState('');
-  const [invPaid,   setInvPaid]   = useState(false);
-  const [costCentre,setCostCentre]= useState('');
+  const loadBudgets = async () => {
+    try {
+      const r = await fetch('/api/budgets', { headers: authH() });
+      if (r.ok) {
+        const data = await r.json();
+        const unique = data.filter((b,i,a)=>a.findIndex(x=>x.id===b.id)===i);
+        if (unique.length) setActiveBudget(unique[0]);
+      }
+    } catch {}
+  };
 
-  const { user } = useAuth();
-  const canEdit = ['Admin', 'Finance'].includes(user?.role);
+  const loadHeads = async (budgetId) => {
+    if (!budgetId) return;
+    try {
+      const r = await fetch(`/api/expense-heads?budgetId=${budgetId}`, { headers: authH() });
+      if (r.ok) setExpenseHeads(await r.json());
+    } catch {}
+  };
 
   const load = async () => {
-    const token = localStorage.getItem('token') || '';
-    const h = { Authorization: `Bearer ${token}` };
-    try { const r = await fetch('/api/pos', { headers: h }); if (r.ok) setList(await r.json()); } catch {}
-    try { const r = await fetch('/api/budgets', { headers: h }); if (r.ok) setBudgets(await r.json()); } catch {}
-    setLoading(false);
-  };
-  useEffect(() => { load(); }, []);
-
-  // Revoke any blob URLs on unmount to avoid memory leaks
-  const blobUrlsRef = useRef([]);
-  useEffect(() => {
-    return () => { blobUrlsRef.current.forEach(u => { try { URL.revokeObjectURL(u); } catch {} }); };
-  }, []);
-
-  const projectName = id => budgets.find(b => b.id === id)?.name || id;
-
-  const resetPO = () => {
-    setProjectId(''); setVendor(''); setPoNumber(''); setAmount('');
-    setDate(''); setStatus('open'); setPdfFile(null); setPdfUrl('');
-  };
-
-  const handlePdfUpload = async (file) => {
-    if (!file) return '';
-    setUploading(true);
-    // Upload to /api/po/upload — falls back to object URL if backend not ready
-    const token = localStorage.getItem('token') || '';
-    const fd = new FormData(); fd.append('file', file);
     try {
-      const r = await fetch('/api/po/upload', {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
-      });
-      if (r.ok) { const d = await r.json(); setUploading(false); return d.url || ''; }
+      const r = await fetch('/api/pos', { headers: authH() });
+      if (r.ok) setList(await r.json());
     } catch {}
-    setUploading(false);
-    // Don't use blob URLs — they die on refresh. Store null so user knows upload failed.
-    console.warn('PO upload endpoint unavailable — PDF not stored');
-    return '';
   };
 
-  const handleCreatePO = async () => {
-    if (!projectId || !amount) return;
-    let url = pdfUrl;
-    if (pdfFile) url = await handlePdfUpload(pdfFile);
-    const token = localStorage.getItem('token') || '';
-    const item = {
-      projectId, vendor, poNumber, amount: parseFloat(amount) || 0,
-      date, status, pdfUrl: url, invoices: [], createdAt: new Date().toISOString(),
-    };
+  useEffect(() => { Promise.all([loadBudgets(), load()]).finally(()=>setLoading(false)); }, []);
+  useEffect(() => { if (activeBudget) loadHeads(activeBudget.id); }, [activeBudget?.id]);
+
+  // When expense head changes — fetch approved NFAs
+  useEffect(() => {
+    setNfaId(''); setApprovedNFAs([]); setNfaBlocked(false);
+    if (!expenseHeadId) return;
+    fetch(`/api/nfa-tracker?expenseHeadId=${expenseHeadId}&status=Approved`, { headers: authH() })
+      .then(r => r.ok ? r.json() : [])
+      .then(data => {
+        setApprovedNFAs(data);
+        setNfaBlocked(data.length === 0);
+      })
+      .catch(() => setNfaBlocked(true));
+  }, [expenseHeadId]);
+
+  const resetForm = () => {
+    setExpenseHeadId(''); setNfaId(''); setApprovedNFAs([]); setNfaBlocked(false);
+    setVendorName(''); setPoNumber(''); setAmount(''); setDescription(''); setStatus('Draft');
+    setPdfUrl(null); setPdfName(''); setAiMsg(''); setError('');
+  };
+
+  /* ── PDF Upload + AI ─────────────────────────────────────── */
+  const handleFileSelect = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setUploading(true); setAiMsg('Uploading PDF…');
+    try {
+      const form = new FormData(); form.append('file', file);
+      const r = await fetch('/api/pos/upload', { method:'POST', headers: authH(), body: form });
+      if (r.ok) { const d = await r.json(); setPdfUrl(d.fileUrl); setPdfName(file.name); }
+    } catch {}
+    setAiMsg('AI reading document…');
+    const rawText = await new Promise(res => {
+      const reader = new FileReader();
+      reader.onload = ev => { const bin = ev.target.result||''; const m=bin.match(/\(([^)\\]{2,120})\)/g)||[]; res(m.map(x=>x.slice(1,-1)).join(' ').slice(0,4000)||bin.slice(0,3000)); };
+      reader.readAsBinaryString(file);
+    });
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ model:'claude-sonnet-4-20250514', max_tokens:200,
+          messages:[{role:'user',content:'Extract PO number, vendor name, and amount in INR. Return ONLY JSON: {"poNumber":"<string or null>","vendorName":"<string or null>","amount":<number or null>}\n\n'+rawText}] }),
+      });
+      const d = await res.json();
+      const parsed = JSON.parse((d.content?.[0]?.text||'{}').replace(/```json|```/g,'').trim());
+      if (parsed.poNumber  && !poNumber)   setPoNumber(parsed.poNumber);
+      if (parsed.vendorName&& !vendorName) setVendorName(parsed.vendorName);
+      if (parsed.amount    && !amount)     setAmount(String(parsed.amount));
+      setAiMsg(parsed.poNumber||parsed.vendorName||parsed.amount
+        ? `AI extracted: PO# ${parsed.poNumber||'—'}, Vendor: ${parsed.vendorName||'—'}, Amount: ${parsed.amount?fmt(parsed.amount):'—'}`
+        : 'AI could not extract data. Please fill manually.');
+    } catch { setAiMsg('AI extraction failed. Please fill manually.'); }
+    setUploading(false);
+    if (fileRef.current) fileRef.current.value = '';
+  };
+
+  /* ── Create ──────────────────────────────────────────────── */
+  const handleCreate = async () => {
+    if (!expenseHeadId) { setError('Select an Expense Head.'); return; }
+    if (!nfaId)         { setError('Select an Approved NFA.'); return; }
+    if (!vendorName)    { setError('Vendor name is required.'); return; }
+    if (!amount)        { setError('Amount is required.'); return; }
+    setSaving(true); setError('');
     try {
       const r = await fetch('/api/pos', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(item),
+        method:'POST', headers: hj(),
+        body: JSON.stringify({ expenseHeadId, nfaId, vendorName, poNumber, amount: parseFloat(amount), description, status, pdfUrl, pdfName }),
       });
-      if (r.ok) { const saved = await r.json(); setList(p => [...p, saved]); }
-      else setList(p => [...p, { ...item, id: Date.now().toString() }]);
-    } catch { setList(p => [...p, { ...item, id: Date.now().toString() }]); }
-    setOpen(false); resetPO();
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || data.errors?.[0]?.msg || `Error ${r.status}`);
+      setAddOpen(false); resetForm(); load();
+    } catch (e) { setError(e.message); }
+    setSaving(false);
   };
 
-  const handleAddInvoice = (po) => { setTargetPO(po); setInvOpen(true); };
-
-  const handleSaveInvoice = async () => {
-    if (!targetPO) return;
-    const inv = {
-      id: Date.now().toString(), invoiceNumber: invNumber, vendor: invVendor,
-      amount: parseFloat(invAmount) || 0, date: invDate, paid: invPaid, costCentre,
-    };
-    const updated = { ...targetPO, invoices: [...(targetPO.invoices || []), inv] };
-    const token = localStorage.getItem('token') || '';
+  /* ── Edit ────────────────────────────────────────────────── */
+  const handleEditSave = async () => {
+    if (!editTarget) return; setSaving(true);
     try {
-      await fetch('/api/pos/' + targetPO.id, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ invoices: updated.invoices }),
+      const r = await fetch(`/api/pos/${editTarget.id}`, {
+        method:'PATCH', headers: hj(),
+        body: JSON.stringify({ vendorName: editTarget.vendorName, poNumber: editTarget.poNumber, amount: parseFloat(editTarget.amount)||0, description: editTarget.description, status: editTarget.status }),
       });
+      if (r.ok) { setEditTarget(null); load(); }
     } catch {}
-    setList(prev => prev.map(p => p.id === targetPO.id ? updated : p));
-    setInvOpen(false);
-    setInvNumber(''); setInvVendor(''); setInvAmount(''); setInvDate(''); setInvPaid(false); setCostCentre('');
+    setSaving(false);
   };
 
-  const filtered = list.filter(p => {
-    const q = search.toLowerCase();
-    return !q
-      || (p.vendor || '').toLowerCase().includes(q)
-      || (p.poNumber || '').toLowerCase().includes(q)
-      || projectName(p.projectId).toLowerCase().includes(q);
-  });
+  /* ── Delete ──────────────────────────────────────────────── */
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      const r = await fetch(`/api/pos/${deleteTarget.id}`, { method:'DELETE', headers: authH() });
+      const d = await r.json();
+      if (!r.ok) { setError(d.error); setDeleteTarget(null); return; }
+      setDeleteTarget(null); load();
+    } catch {}
+  };
 
-  const totalCommitted = filtered.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-  const totalInvoiced  = filtered.reduce((s, p) =>
-    s + (p.invoices || []).reduce((si, i) => si + (Number(i.amount) || 0), 0), 0);
-  const totalPaid      = filtered.reduce((s, p) =>
-    s + (p.invoices || []).filter(i => i.paid).reduce((si, i) => si + (Number(i.amount) || 0), 0), 0);
+  const downloadAll = () => list.filter(p=>p.pdfUrl).forEach(p=>{const a=document.createElement('a');a.href=p.pdfUrl;a.download=p.pdfName||`PO_${p.poNumber}.pdf`;a.click();});
 
-  if (loading) return <Box display="flex" justifyContent="center" p={4}><CircularProgress /></Box>;
+  const totalVal      = list.reduce((s,p)=>s+(p.amount||0),0);
+  const totalInvoiced = list.reduce((s,p)=>s+(p.invoices||[]).reduce((si,i)=>si+(i.amount||0)+(i.tax||0),0),0);
+  const headName = id => expenseHeads.find(h=>h.id===id)?.name || '—';
+
+  const STATUS_STYLE = {
+    Draft:{background:'#F1F5F9',color:'#475569'}, Issued:{background:'#DBEAFE',color:'#1E40AF'},
+    'Partially Invoiced':{background:'#FEF3C7',color:'#92400E'}, 'Fully Invoiced':{background:'#D1FAE5',color:'#065F46'},
+    Closed:{background:'#E2E8F0',color:'#334155'}, Cancelled:{background:'#FEE2E2',color:'#991B1B'},
+  };
+
+  if (loading) return <div className="spinner-wrap"><div className="spinner"/></div>;
 
   return (
-    <Box>
-      {/* Header */}
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2} flexWrap="wrap" gap={1}>
-        <Typography variant="h5">PO Tracker</Typography>
-        {canEdit && (
-          <Button startIcon={<AddIcon />} variant="contained" onClick={() => setOpen(true)}>
-            Add PO
-          </Button>
-        )}
-      </Box>
+    <div className="page">
+      <div className="page-header">
+        <h1 className="page-title">PO Tracker</h1>
+        <div className="btn-row">
+          <button className="btn btn-ghost btn-sm" onClick={downloadAll}>↓ Download All</button>
+          {canEdit && <button className="btn btn-primary" onClick={()=>{setAddOpen(true);resetForm();}}>+ New PO</button>}
+        </div>
+      </div>
 
-      {/* Search */}
-      <Box mb={2}>
-        <TextField size="small" placeholder="Search by PO number, vendor, project…"
-          value={search} onChange={e => setSearch(e.target.value)} sx={{ width: 360 }}
-          InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment> }} />
-      </Box>
+      {error && <div className="alert alert-error" style={{marginBottom:12}}>{error}<button onClick={()=>setError('')} style={{float:'right',background:'none',border:'none',cursor:'pointer'}}>✕</button></div>}
 
-      {/* Summary */}
-      <Box display="flex" gap={1.5} mb={2} flexWrap="wrap">
+      <div className="cards-row">
         {[
-          { label: 'Total POs', value: filtered.length, color: '#F97316' },
-          { label: 'Open', value: filtered.filter(p => p.status === 'open').length, color: '#10B981' },
-          { label: 'PO Value', value: fmt(totalCommitted), color: '#F97316' },
-          { label: 'Invoiced', value: fmt(totalInvoiced), color: '#F59E0B' },
-          { label: 'Paid', value: fmt(totalPaid), color: '#10B981' },
-        ].map((s, i) => (
-          <Box key={i} sx={{ bgcolor: '#fff', border: '1px solid #E2E8F0', borderRadius: 2, px: 2, py: 1 }}>
-            <Typography variant="caption" color="text.secondary" display="block"
-              sx={{ textTransform: 'uppercase', fontSize: 9, fontWeight: 700, letterSpacing: '0.08em' }}>{s.label}</Typography>
-            <Typography fontWeight={800} fontSize={17} color={s.color}>{s.value}</Typography>
-          </Box>
+          { label:'Total POs',      value: list.length,                         color:'#4F6EF7' },
+          { label:'PO Value',       value: fmt(totalVal),                       color:'#8B5CF6' },
+          { label:'Total Invoiced', value: fmt(totalInvoiced),                  color:'#F59E0B' },
+          { label:'Open Value',     value: fmt(Math.max(0,totalVal-totalInvoiced)), color:'#10B981' },
+        ].map(s => (
+          <div key={s.label} className="card">
+            <div className="card-label">{s.label}</div>
+            <div className="card-value" style={{color:s.color}}>{s.value}</div>
+          </div>
         ))}
-      </Box>
+      </div>
 
-      {/* Table */}
-      <Card>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableCell padding="checkbox" />
-              <TableCell>PO Number</TableCell>
-              <TableCell>Project</TableCell>
-              <TableCell>Vendor</TableCell>
-              <TableCell align="right">PO Amount</TableCell>
-              <TableCell align="right">Invoiced</TableCell>
-              <TableCell align="right">Paid</TableCell>
-              <TableCell>PO Date</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell>PO PDF</TableCell>
-              <TableCell>Invoices</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {filtered.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={11} align="center" sx={{ py: 4, color: 'text.secondary' }}>
-                  No POs found. Click "Add PO" to create one.
-                </TableCell>
-              </TableRow>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style={{width:40}}/>
+              <th>PO Number</th>
+              <th>NFA Number</th>
+              <th>Expense Head</th>
+              <th>Vendor</th>
+              <th style={{textAlign:'right'}}>Amount</th>
+              <th>Status</th>
+              <th style={{textAlign:'right'}}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map(po => {
+              const invoices = po.invoices || [];
+              const totalInv = invoices.reduce((s,i)=>s+(i.amount||0)+(i.tax||0),0);
+              const isOpen   = expanded[po.id];
+              const sStyle   = STATUS_STYLE[po.status] || STATUS_STYLE.Draft;
+              return (
+                <>
+                  <tr key={po.id} style={{background:isOpen?'#F8FAFF':'#fff'}}>
+                    <td><button className="expand-btn" onClick={()=>setExpanded(e=>({...e,[po.id]:!e[po.id]}))}>{isOpen?'▼':'▶'}</button></td>
+                    <td style={{fontFamily:'monospace',fontWeight:700}}>{po.poNumber||'—'}</td>
+                    <td style={{fontSize:12,color:'#4F6EF7',fontFamily:'monospace'}}>{po.nfaNumber||'—'}</td>
+                    <td style={{fontSize:12}}>{headName(po.expenseHeadId)}</td>
+                    <td style={{fontSize:13}}>{po.vendorName}</td>
+                    <td style={{textAlign:'right',fontWeight:600}}>{fmt(po.amount)}</td>
+                    <td><span className="chip" style={sStyle}>{po.status}</span></td>
+                    <td style={{textAlign:'right'}}>
+                      <div style={{display:'flex',gap:4,justifyContent:'flex-end'}}>
+                        <button className="btn-icon" onClick={()=>setEditTarget({...po})} title="Edit">✏</button>
+                        {po.pdfUrl && <a className="btn-icon" href={po.pdfUrl} download={po.pdfName||'PO.pdf'} title="Download">↓</a>}
+                        {canEdit && <button className="btn-icon red" onClick={()=>setDeleteTarget(po)} title="Delete">🗑</button>}
+                      </div>
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <tr key={`${po.id}-exp`}>
+                      <td colSpan={8} style={{padding:0}}>
+                        <div className="expanded-panel">
+                          <div style={{display:'flex',gap:24,flexWrap:'wrap'}}>
+                            <div style={{flex:1,minWidth:200}}>
+                              <div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.08em',color:'#94A3B8',marginBottom:8}}>PO Details</div>
+                              {po.description && <p style={{fontSize:13,color:'#64748B',margin:'0 0 8px'}}>{po.description}</p>}
+                              <div style={{fontSize:12,color:'#64748B'}}>PO: <strong>{fmt(po.amount)}</strong> · Invoiced: <strong style={{color:totalInv>po.amount?'#EF4444':'#10B981'}}>{fmt(totalInv)}</strong> · Remaining: <strong>{fmt(Math.max(0,po.amount-totalInv))}</strong></div>
+                            </div>
+                            <div style={{flex:1,minWidth:240}}>
+                              <div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.08em',color:'#94A3B8',marginBottom:8}}>Invoices ({invoices.length})</div>
+                              {invoices.length===0 ? <span style={{fontSize:12,color:'#CBD5E1'}}>No invoices yet.</span>
+                                : invoices.map(inv=>(
+                                  <div key={inv.id} style={{display:'flex',alignItems:'center',gap:8,padding:'5px 0',borderBottom:'1px dashed #E2E8F0'}}>
+                                    <span style={{flex:1,fontSize:12,fontWeight:600}}>{inv.vendorName}{inv.invoiceNumber?` #${inv.invoiceNumber}`:''}</span>
+                                    <span style={{fontSize:12,fontWeight:700,color:'#4F6EF7'}}>{fmt((inv.amount||0)+(inv.tax||0))}</span>
+                                    <span className="chip" style={{fontSize:9,padding:'1px 5px',background:inv.status==='Paid'?'#D1FAE5':'#EFF6FF',color:inv.status==='Paid'?'#065F46':'#1D4ED8'}}>{inv.status||'Pending'}</span>
+                                  </div>
+                                ))
+                              }
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
+              );
+            })}
+            {list.length===0 && <tr><td colSpan={8} style={{textAlign:'center',padding:'40px',color:'#94A3B8'}}>No POs yet. Click "+ New PO" to create one.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Add PO Modal */}
+      <Modal open={addOpen} onClose={()=>{setAddOpen(false);resetForm();}} title="New Purchase Order" large
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={()=>{setAddOpen(false);resetForm();}}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={saving||!expenseHeadId||!nfaId||!vendorName||!amount}>
+            {saving?'Creating…':'Create PO'}
+          </button>
+        </>}>
+        {error && <div className="alert alert-error">{error}</div>}
+
+        {/* PDF Upload */}
+        <div style={{padding:'12px 14px',background:'#F8FAFF',borderRadius:8,border:'1.5px solid #E2E8F0',marginBottom:16}}>
+          <div style={{fontWeight:700,fontSize:13,marginBottom:8}}>Upload PO PDF (optional — AI will extract data)</div>
+          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+            <button className="btn btn-outline btn-sm" disabled={uploading} onClick={()=>fileRef.current?.click()}>
+              {uploading?'Processing…':pdfUrl?'↑ Replace PDF':'↑ Upload PDF'}
+            </button>
+            {pdfUrl && <span style={{fontSize:12,color:'#10B981',fontWeight:600}}>✔ {pdfName}</span>}
+          </div>
+          <input ref={fileRef} type="file" accept="application/pdf" style={{display:'none'}} onChange={handleFileSelect}/>
+          {aiMsg && <div className={`alert ${aiMsg.includes('extracted')&&!aiMsg.includes('could not')?'alert-success':'alert-info'}`} style={{marginTop:8,padding:'5px 10px',fontSize:12}}>{aiMsg}</div>}
+        </div>
+
+        {/* Expense Head */}
+        <div className="field">
+          <label>Expense Head *</label>
+          <select value={expenseHeadId} onChange={e=>setExpenseHeadId(e.target.value)} required>
+            <option value="">— Select Expense Head —</option>
+            {expenseHeads.map(h=><option key={h.id} value={h.id}>{h.name}</option>)}
+          </select>
+        </div>
+
+        {/* NFA — only after expense head selected */}
+        {expenseHeadId && (
+          <div className="field">
+            <label>Approved NFA *</label>
+            {nfaBlocked ? (
+              <div className="alert alert-error" style={{padding:'8px 12px',fontSize:12}}>
+                ⚠ No Approved NFA found for this Expense Head. NFA must be approved before raising a PO.
+              </div>
+            ) : (
+              <select value={nfaId} onChange={e=>setNfaId(e.target.value)} required>
+                <option value="">— Select NFA —</option>
+                {approvedNFAs.map(n=><option key={n.id} value={n.id}>{n.nfaNumber} — {n.title}</option>)}
+              </select>
             )}
-            {filtered.map((po, i) => (
-              <PORow key={i} po={po} projectName={projectName} canEdit={canEdit}
-                onAddInvoice={handleAddInvoice} />
-            ))}
-          </TableBody>
-        </Table>
-      </Card>
+          </div>
+        )}
 
-      {/* ── Add PO dialog ── */}
-      <Dialog open={open} onClose={() => { setOpen(false); resetPO(); }} maxWidth="sm" fullWidth>
-        <DialogTitle>Add Purchase Order</DialogTitle>
-        <DialogContent>
-          <Box display="grid" gridTemplateColumns="1fr 1fr" gap={1.5} mt={0.5}>
-            <FormControl fullWidth size="small" sx={{ gridColumn: '1 / -1' }}>
-              <InputLabel>Project *</InputLabel>
-              <Select value={projectId} label="Project *" onChange={e => setProjectId(e.target.value)}>
-                <MenuItem value=""><em>Select project…</em></MenuItem>
-                {budgets.map(b => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
-              </Select>
-            </FormControl>
+        <div className="field"><label>Vendor Name *</label><input value={vendorName} onChange={e=>setVendorName(e.target.value)}/></div>
+        <div className="fields-2">
+          <div className="field"><label>PO Number</label><input value={poNumber} onChange={e=>setPoNumber(e.target.value)} placeholder="e.g. PO/2026/001"/></div>
+          <div className="field"><label>Status</label>
+            <select value={status} onChange={e=>setStatus(e.target.value)}>
+              {PO_STATUSES.map(s=><option key={s}>{s}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="field"><label>PO Amount (₹) *</label><input type="number" min={0} step={0.01} value={amount} onChange={e=>setAmount(e.target.value)}/></div>
+        <div className="field"><label>Description</label><textarea value={description} onChange={e=>setDescription(e.target.value)}/></div>
+      </Modal>
 
-            <TextField size="small" label="PO Number" value={poNumber}
-              onChange={e => setPoNumber(e.target.value)} placeholder="e.g. PO/2025/001" />
-            <TextField size="small" label="Vendor" value={vendor}
-              onChange={e => setVendor(e.target.value)} />
+      {/* Edit Modal */}
+      <Modal open={!!editTarget} onClose={()=>setEditTarget(null)} title="Edit PO"
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={()=>setEditTarget(null)}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleEditSave} disabled={saving}>Save</button>
+        </>}>
+        {editTarget && <>
+          <div className="field"><label>Vendor Name</label><input value={editTarget.vendorName||''} onChange={e=>setEditTarget(t=>({...t,vendorName:e.target.value}))}/></div>
+          <div className="fields-2">
+            <div className="field"><label>PO Number</label><input value={editTarget.poNumber||''} onChange={e=>setEditTarget(t=>({...t,poNumber:e.target.value}))}/></div>
+            <div className="field"><label>Status</label>
+              <select value={editTarget.status||'Draft'} onChange={e=>setEditTarget(t=>({...t,status:e.target.value}))}>
+                {PO_STATUSES.map(s=><option key={s}>{s}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="field"><label>Amount (₹)</label><input type="number" min={0} value={editTarget.amount||''} onChange={e=>setEditTarget(t=>({...t,amount:e.target.value}))}/></div>
+          <div className="field"><label>Description</label><textarea value={editTarget.description||''} onChange={e=>setEditTarget(t=>({...t,description:e.target.value}))}/></div>
+        </>}
+      </Modal>
 
-            <TextField size="small" type="number" label="PO Amount (₹) *" value={amount}
-              onChange={e => setAmount(e.target.value)} />
-            <TextField size="small" type="date" label="PO Date" value={date}
-              onChange={e => setDate(e.target.value)} InputLabelProps={{ shrink: true }} />
-
-            <FormControl fullWidth size="small">
-              <InputLabel>Status</InputLabel>
-              <Select value={status} label="Status" onChange={e => setStatus(e.target.value)}>
-                <MenuItem value="open">Open</MenuItem>
-                <MenuItem value="partial">Partial</MenuItem>
-                <MenuItem value="closed">Closed</MenuItem>
-                <MenuItem value="cancelled">Cancelled</MenuItem>
-              </Select>
-            </FormControl>
-
-            {/* PDF upload */}
-            <Box sx={{ gridColumn: '1 / -1' }}>
-              <input ref={fileRef} type="file" accept="application/pdf" style={{ display: 'none' }}
-                onChange={e => setPdfFile(e.target.files[0] || null)} />
-              <Button startIcon={<UploadFileIcon />} variant="outlined" size="small"
-                onClick={() => fileRef.current?.click()}>
-                {pdfFile ? pdfFile.name : 'Upload PO PDF'}
-              </Button>
-              {pdfFile && <Typography variant="caption" color="success.main" ml={1}>Ready to upload</Typography>}
-            </Box>
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => { setOpen(false); resetPO(); }}>Cancel</Button>
-          <Button variant="contained" onClick={handleCreatePO}
-            disabled={!projectId || !amount || uploading}>
-            {uploading ? 'Uploading…' : 'Save PO'}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* ── Add Invoice dialog ── */}
-      <Dialog open={invOpen} onClose={() => setInvOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>Add Invoice — {targetPO?.poNumber || targetPO?.id}</DialogTitle>
-        <DialogContent>
-          <Box display="grid" gridTemplateColumns="1fr 1fr" gap={1.5} mt={0.5}>
-            <TextField size="small" label="Invoice Number" value={invNumber}
-              onChange={e => setInvNumber(e.target.value)} />
-            <TextField size="small" label="Vendor" value={invVendor}
-              onChange={e => setInvVendor(e.target.value)} />
-            <TextField size="small" type="number" label="Invoice Amount (₹)" value={invAmount}
-              onChange={e => setInvAmount(e.target.value)} />
-            <TextField size="small" type="date" label="Invoice Date" value={invDate}
-              onChange={e => setInvDate(e.target.value)} InputLabelProps={{ shrink: true }} />
-            <TextField size="small" label="Cost Centre" value={costCentre}
-              onChange={e => setCostCentre(e.target.value)} placeholder="Optional" />
-            <FormControl fullWidth size="small">
-              <InputLabel>Payment Status</InputLabel>
-              <Select value={invPaid} label="Payment Status" onChange={e => setInvPaid(e.target.value)}>
-                <MenuItem value={false}>Unpaid</MenuItem>
-                <MenuItem value={true}>Paid</MenuItem>
-              </Select>
-            </FormControl>
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setInvOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleSaveInvoice}>Add Invoice</Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
+      {/* Delete Modal */}
+      <Modal open={!!deleteTarget} onClose={()=>setDeleteTarget(null)} title="Delete PO?" small
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={()=>setDeleteTarget(null)}>Cancel</button>
+          <button className="btn btn-danger btn-sm" onClick={handleDelete}>Delete</button>
+        </>}>
+        <p style={{margin:0,fontSize:13}}>Delete PO <strong>{deleteTarget?.poNumber||deleteTarget?.id}</strong>?</p>
+        {error && <div className="alert alert-error" style={{marginTop:8}}>{error}</div>}
+      </Modal>
+    </div>
   );
 }

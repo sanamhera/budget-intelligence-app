@@ -5,11 +5,117 @@
    • Add / Edit / Delete / Search
    • Duplicate prevention via backend (409 response)
 */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   T, Badge, TH, TD, IS, Field, Modal, Btn, SearchBar,
   PageHeader, PAGE_STYLE, Card,
 } from "./shared";
+
+/* ── Service tag helpers ──────────────────────────────────────── */
+const SVC_PALETTE = ['#0D9488','#7C3AED','#DB2777','#EA580C','#D97706','#059669','#0891B2','#9333EA','#DC2626','#65A30D'];
+const svcColor = (s = '') => {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return SVC_PALETTE[Math.abs(h) % SVC_PALETTE.length];
+};
+const hex2rgba = (hex, a) => {
+  const h = hex.replace('#', '');
+  return `rgba(${parseInt(h.slice(0,2),16)},${parseInt(h.slice(2,4),16)},${parseInt(h.slice(4,6),16)},${a})`;
+};
+
+function SvcChip({ label, onRemove }) {
+  const c = svcColor(label);
+  return (
+    <span style={{ display:'inline-flex', alignItems:'center', gap:3, height:19, padding:'0 7px', borderRadius:20, background:hex2rgba(c,0.10), border:`1px solid ${hex2rgba(c,0.25)}`, whiteSpace:'nowrap', flexShrink:0 }}>
+      <span style={{ fontSize:10, fontWeight:600, color:c, lineHeight:1, letterSpacing:'0.02em', fontFamily:"'DM Sans',sans-serif" }}>{label}</span>
+      {onRemove && (
+        <button onClick={e => { e.stopPropagation(); onRemove(); }}
+          style={{ background:'none', border:'none', padding:0, marginLeft:2, cursor:'pointer', color:c, fontSize:13, lineHeight:1, opacity:0.4, display:'flex', alignItems:'center' }}
+          onMouseEnter={e => e.currentTarget.style.opacity='1'}
+          onMouseLeave={e => e.currentTarget.style.opacity='0.4'}
+          title="Remove">×</button>
+      )}
+    </span>
+  );
+}
+
+/* ── ServiceTagInput — inline searchable multi-tag ───────────── */
+function ServiceTagInput({ services, allServices, onSaved }) {
+  const [open,  setOpen]  = useState(false);
+  const [input, setInput] = useState('');
+  const wrapRef = useRef(null);
+  const inRef   = useRef(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+
+  useEffect(() => {
+    if (!open) return;
+    const fn = e => { if (wrapRef.current && !wrapRef.current.contains(e.target)) { setOpen(false); setInput(''); } };
+    document.addEventListener('mousedown', fn);
+    return () => document.removeEventListener('mousedown', fn);
+  }, [open]);
+
+  useEffect(() => {
+    if (open && wrapRef.current) {
+      const r = wrapRef.current.getBoundingClientRect();
+      setPos({ top: r.bottom + 6, left: r.left });
+      setTimeout(() => inRef.current?.focus(), 10);
+    }
+  }, [open]);
+
+  const add = val => {
+    const v = val.trim();
+    if (!v || services.includes(v)) { setInput(''); setOpen(false); return; }
+    onSaved([...services, v]);
+    setInput(''); setOpen(false);
+  };
+
+  const suggestions = allServices.filter(s => !services.includes(s) && (!input || s.toLowerCase().includes(input.toLowerCase())));
+  const canCreate   = input.trim() && !allServices.find(s => s.toLowerCase() === input.trim().toLowerCase());
+
+  return (
+    <div ref={wrapRef} style={{ position:'relative', display:'inline-flex', flexShrink:0 }} onClick={e => e.stopPropagation()}>
+      <button onClick={() => setOpen(o => !o)}
+        style={{ height:19, padding:'0 6px', borderRadius:5, border:'1px dashed #C4C9D4', background:'transparent', cursor:'pointer', display:'inline-flex', alignItems:'center', gap:3, color:'#9BA3B2', fontSize:10, fontWeight:500, flexShrink:0, transition:'all 0.15s', whiteSpace:'nowrap' }}
+        onMouseEnter={e => { e.currentTarget.style.borderColor='#0D9488'; e.currentTarget.style.color='#0D9488'; e.currentTarget.style.background='#F0FDFA'; }}
+        onMouseLeave={e => { e.currentTarget.style.borderColor='#C4C9D4'; e.currentTarget.style.color='#9BA3B2'; e.currentTarget.style.background='transparent'; }}>
+        <span style={{ fontSize:13, lineHeight:1 }}>+</span> service
+      </button>
+
+      {open && (
+        <div style={{ position:'fixed', top:pos.top, left:pos.left, zIndex:9999, background:'#fff', border:'1px solid #E2E8F0', borderRadius:10, boxShadow:'0 10px 40px rgba(0,0,0,0.15)', padding:8, minWidth:230, maxHeight:300, overflowY:'auto' }}>
+          <input ref={inRef} value={input} onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(input); } if (e.key === 'Escape') { setOpen(false); setInput(''); } }}
+            placeholder="Search or create service / project…"
+            style={{ width:'100%', padding:'7px 10px', border:'1.5px solid #E2E8F0', borderRadius:7, fontSize:12, outline:'none', boxSizing:'border-box', fontFamily:"'DM Sans',sans-serif", marginBottom:6, color:'#1A2035' }}
+            onFocus={e => e.currentTarget.style.borderColor='#0D9488'}
+            onBlur={e => e.currentTarget.style.borderColor='#E2E8F0'}
+          />
+          {suggestions.length === 0 && !canCreate && (
+            <div style={{ fontSize:11, color:'#9BA3B2', padding:'6px 8px', fontFamily:"'DM Sans',sans-serif" }}>
+              {input ? 'No matching services.' : 'Type to search or create a service.'}
+            </div>
+          )}
+          {suggestions.map(s => (
+            <div key={s} onClick={() => add(s)}
+              style={{ padding:'6px 8px', borderRadius:6, cursor:'pointer', fontSize:12, fontFamily:"'DM Sans',sans-serif", color:'#1A2035', display:'flex', alignItems:'center', gap:7, transition:'background 0.1s' }}
+              onMouseEnter={e => e.currentTarget.style.background='#F0FDFA'}
+              onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+              <SvcChip label={s} />
+            </div>
+          ))}
+          {canCreate && (
+            <div onClick={() => add(input)}
+              style={{ padding:'7px 8px', borderRadius:6, cursor:'pointer', fontSize:12, fontFamily:"'DM Sans',sans-serif", color:'#0D9488', fontWeight:600, display:'flex', alignItems:'center', gap:6, borderTop: suggestions.length > 0 ? '1px solid #F0F4F8' : 'none', marginTop: suggestions.length > 0 ? 4 : 0 }}
+              onMouseEnter={e => e.currentTarget.style.background='#F0FDFA'}
+              onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+              <span style={{ fontSize:14 }}>✦</span> Create "{input.trim()}"
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const VCAT     = ["Software","Infrastructure","Hardware","Consulting","Maintenance","AMC","Other"];
 const CONTRACT = ["AMC","Project","Retainer","One-time"];
@@ -17,6 +123,71 @@ const CONTRACT = ["AMC","Project","Retainer","One-time"];
 const tkn  = () => localStorage.getItem("token") || "";
 const hdr  = () => ({ Authorization: `Bearer ${tkn()}` });
 const hdrJ = () => ({ ...hdr(), "Content-Type": "application/json" });
+
+/* ── Inline editable cell ────────────────────────────────────── */
+function EditableCell({ value, onSave, type = 'text', options, placeholder, render }) {
+  const [editing, setEditing] = useState(false);
+  const [val,     setVal]     = useState('');
+  const [saving,  setSaving]  = useState(false);
+  const [err,     setErr]     = useState('');
+  const ref = useRef(null);
+
+  const start = () => { setVal(value ?? ''); setEditing(true); setErr(''); };
+  useEffect(() => { if (editing) setTimeout(() => ref.current?.focus(), 0); }, [editing]);
+
+  const commit = async () => {
+    if (!editing) return;
+    const next = typeof val === 'string' ? val.trim() : val;
+    if (next === (value ?? '').toString().trim()) { setEditing(false); return; }
+    setSaving(true);
+    const result = await onSave(next);
+    setSaving(false);
+    if (result?.error) setErr(result.error);
+    else setEditing(false);
+  };
+
+  const cancel = () => { setEditing(false); setVal(''); setErr(''); };
+
+  const inputStyle = {
+    width: '100%', padding: '5px 8px', border: '2px solid #4F6EF7',
+    borderRadius: 6, fontSize: 12, fontFamily: "'DM Sans',sans-serif",
+    outline: 'none', color: '#1A2035', boxSizing: 'border-box', background: '#fff',
+    boxShadow: '0 0 0 3px rgba(79,110,247,0.12)',
+  };
+
+  if (editing) return (
+    <div style={{ position: 'relative', minWidth: 80 }}>
+      {options
+        ? <select ref={ref} value={val} onChange={e => setVal(e.target.value)}
+            onBlur={commit} onKeyDown={e => { if (e.key === 'Escape') cancel(); }}
+            style={{ ...inputStyle, background: '#fff' }}>
+            <option value="">— None —</option>
+            {options.map(o => <option key={o}>{o}</option>)}
+          </select>
+        : <input ref={ref} type={type} value={val} placeholder={placeholder}
+            onChange={e => setVal(e.target.value)} onBlur={commit}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commit(); } if (e.key === 'Escape') cancel(); }}
+            style={inputStyle} />
+      }
+      {saving && <span style={{ position:'absolute', right:8, top:'50%', transform:'translateY(-50%)', fontSize:10, color:'#94A3B8', pointerEvents:'none' }}>saving…</span>}
+      {err && <div style={{ position:'absolute', top:'calc(100% + 4px)', left:0, zIndex:9999, background:'#FFF1F2', border:'1px solid #FECDD3', borderRadius:6, padding:'4px 10px', fontSize:11, color:'#BE123C', whiteSpace:'nowrap', boxShadow:'0 2px 8px rgba(0,0,0,0.1)' }}>{err}</div>}
+    </div>
+  );
+
+  return (
+    <div onClick={start} title="Click to edit"
+      style={{ cursor:'text', minHeight:26, display:'flex', alignItems:'center', borderRadius:5, padding:'2px 5px', margin:'-2px -5px', transition:'background 0.12s' }}
+      onMouseEnter={e => e.currentTarget.style.background='#EEF2FF'}
+      onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+      {render
+        ? render(value)
+        : value
+          ? <span style={{ fontSize:12, fontFamily:"'DM Sans',sans-serif", color:'#1A2035' }}>{value}</span>
+          : <span style={{ fontSize:12, fontFamily:"'DM Sans',sans-serif", color:'#C4C9D4', fontStyle:'italic' }}>{placeholder || '—'}</span>
+      }
+    </div>
+  );
+}
 
 /* ── Delete Confirm ──────────────────────────────────────────── */
 function DeleteConfirm({ vendor, onConfirm, onClose }) {
@@ -34,9 +205,9 @@ function DeleteConfirm({ vendor, onConfirm, onClose }) {
 }
 
 /* ── Add / Edit Modal ────────────────────────────────────────── */
-function VendorModal({ vendor, onClose, onSaved }) {
+function VendorModal({ vendor, onClose, onSaved, allServices }) {
   const isEdit = !!vendor;
-  const BLANK  = { name:"", vendorCode:"", category:"", contractType:"", contactPerson:"", email:"", phone:"", gstNumber:"", address:"" };
+  const BLANK  = { name:"", vendorCode:"", category:"", contractType:"", contactPerson:"", email:"", phone:"", gstNumber:"", address:"", services:[] };
   const [form,   setForm]   = useState(isEdit ? { ...vendor } : BLANK);
   const [saving, setSaving] = useState(false);
   const [error,  setError]  = useState("");
@@ -99,6 +270,23 @@ function VendorModal({ vendor, onClose, onSaved }) {
             <input value={form.address || ""} onChange={e => F("address", e.target.value)} style={IS} placeholder="Full registered address"/>
           </Field>
         </div>
+        <div style={{ gridColumn: "1/-1" }}>
+          <Field label="Services / Projects">
+            <div style={{ display:'flex', flexWrap:'wrap', gap:5, alignItems:'center', padding:'8px 10px', border:'1.5px solid #E8ECF4', borderRadius:9, minHeight:42, background:'#FAFBFF' }}>
+              {(form.services || []).map(s => (
+                <SvcChip key={s} label={s} onRemove={() => F('services', (form.services||[]).filter(x => x !== s))} />
+              ))}
+              <ServiceTagInput
+                services={form.services || []}
+                allServices={allServices || []}
+                onSaved={next => F('services', next)}
+              />
+            </div>
+            <div style={{ fontSize:11, color:'#94A3B8', marginTop:5, fontFamily:"'DM Sans',sans-serif" }}>
+              Tag what services or projects this vendor provides (e.g. "Cloud Hosting", "Payroll System")
+            </div>
+          </Field>
+        </div>
       </div>
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
         <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
@@ -118,6 +306,7 @@ export default function Vendors() {
   const [loading,   setLoading]   = useState(true);
   const [search,    setSearch]    = useState("");
   const [fCat,      setFCat]      = useState("");
+  const [fSvcs,     setFSvcs]     = useState([]);
   const [showAdd,   setShowAdd]   = useState(false);
   const [editV,     setEditV]     = useState(null);
   const [delV,      setDelV]      = useState(null);
@@ -132,6 +321,33 @@ export default function Vendors() {
 
   useEffect(() => { load().finally(() => setLoading(false)); }, []);
 
+  const handleServiceUpdate = async (vendorId, services) => {
+    setVendors(prev => prev.map(v => v.id === vendorId ? { ...v, services } : v));
+    try {
+      await fetch(`/api/vendors/${vendorId}`, { method: "PATCH", headers: hdrJ(), body: JSON.stringify({ services }) });
+    } catch { load(); }
+  };
+
+  const handleCellSave = async (vendorId, field, value) => {
+    const orig = vendors.find(v => v.id === vendorId)?.[field];
+    setVendors(prev => prev.map(v => v.id === vendorId ? { ...v, [field]: value } : v));
+    try {
+      const r    = await fetch(`/api/vendors/${vendorId}`, { method: "PATCH", headers: hdrJ(), body: JSON.stringify({ [field]: value }) });
+      const json = await r.json();
+      if (!r.ok) {
+        setVendors(prev => prev.map(v => v.id === vendorId ? { ...v, [field]: orig } : v));
+        return { error: json.error || "Save failed" };
+      }
+      return null;
+    } catch (e) {
+      setVendors(prev => prev.map(v => v.id === vendorId ? { ...v, [field]: orig } : v));
+      return { error: e.message };
+    }
+  };
+
+  const allServices = [...new Set(vendors.flatMap(v => v.services || []))].sort();
+  const toggleSvc   = s => setFSvcs(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
+
   const handleDelete = async () => {
     setDelError("");
     const r = await fetch(`/api/vendors/${delV.id}`, { method: "DELETE", headers: hdr() });
@@ -142,11 +358,11 @@ export default function Vendors() {
 
   const filtered = vendors.filter(v => {
     const q = search.toLowerCase();
-    return (
-      (!q || [v.name, v.vendorCode, v.gstNumber, v.contactPerson, v.email]
-        .some(f => (f || "").toLowerCase().includes(q))) &&
-      (!fCat || v.category === fCat)
-    );
+    const matchSearch = !q || [v.name, v.vendorCode, v.gstNumber, v.contactPerson, v.email, ...(v.services || [])]
+      .some(f => (f || "").toLowerCase().includes(q));
+    const matchCat = !fCat || v.category === fCat;
+    const matchSvc = fSvcs.length === 0 || fSvcs.some(s => (v.services || []).includes(s));
+    return matchSearch && matchCat && matchSvc;
   });
 
   const kpis = [
@@ -191,6 +407,43 @@ export default function Vendors() {
         ))}
       </div>
 
+      {/* Service tag filter bar */}
+      {allServices.length > 0 && (
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14, flexWrap:"wrap" }}>
+          <span style={{ fontSize:10, fontWeight:700, color:T.muted, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:"'DM Sans',sans-serif", flexShrink:0 }}>
+            Filter by service:
+          </span>
+          {allServices.map(s => {
+            const active = fSvcs.includes(s);
+            const c = svcColor(s);
+            return (
+              <button key={s} onClick={() => toggleSvc(s)}
+                style={{ display:"inline-flex", alignItems:"center", gap:4, height:24, padding:"0 10px", borderRadius:20, cursor:"pointer", fontSize:11, fontWeight:600, fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap", transition:"all 0.15s",
+                  background: active ? hex2rgba(c, 0.14) : "#fff",
+                  border: active ? `1.5px solid ${hex2rgba(c, 0.45)}` : "1.5px solid #E2E8F0",
+                  color: active ? c : T.muted,
+                  boxShadow: active ? `0 0 0 3px ${hex2rgba(c, 0.1)}` : "none",
+                }}>
+                {active && <span style={{ width:6, height:6, borderRadius:"50%", background:c, flexShrink:0 }}/>}
+                {s}
+                {active && <span style={{ fontSize:14, lineHeight:1, marginLeft:1, opacity:0.55 }}>×</span>}
+              </button>
+            );
+          })}
+          {fSvcs.length > 0 && (
+            <button onClick={() => setFSvcs([])}
+              style={{ fontSize:11, color:T.muted, background:"none", border:"none", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textDecoration:"underline", padding:"0 4px" }}>
+              Clear all
+            </button>
+          )}
+          {fSvcs.length > 0 && (
+            <span style={{ fontSize:11, color:T.muted, fontFamily:"'DM Sans',sans-serif", marginLeft:4 }}>
+              — {filtered.length} of {vendors.length} vendor{vendors.length !== 1 ? "s" : ""}
+            </span>
+          )}
+        </div>
+      )}
+
       <Card style={{ padding: 0, overflow: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
@@ -202,13 +455,14 @@ export default function Vendors() {
               <TH>Email</TH>
               <TH>Phone</TH>
               <TH>Category</TH>
+              <TH>Services / Projects</TH>
               <TH>Created</TH>
               <TH right>Actions</TH>
             </tr>
           </thead>
           <tbody>
             {filtered.length === 0 && (
-              <tr><td colSpan={9} style={{ padding: 32, textAlign: "center", color: T.muted, fontFamily: "'DM Sans',sans-serif", fontSize: 13 }}>
+              <tr><td colSpan={10} style={{ padding: 32, textAlign: "center", color: T.muted, fontFamily: "'DM Sans',sans-serif", fontSize: 13 }}>
                 No vendors found. Click '+ Add Vendor' to add one.
               </td></tr>
             )}
@@ -219,34 +473,71 @@ export default function Vendors() {
                 style={{ transition: "background 0.12s" }}>
 
                 <TD>
-                  <span style={{ fontFamily: "monospace", fontSize: 11, background: "#F0FDFA", color: T.teal, padding: "2px 8px", borderRadius: 5, fontWeight: 700, whiteSpace: "nowrap" }}>
-                    {v.vendorCode || "—"}
-                  </span>
-                  {v.source === "auto-invoice" && (
-                    <span style={{ fontSize: 9, color: T.muted, fontFamily: "'DM Sans',sans-serif", marginLeft: 6 }}>auto</span>
-                  )}
+                  <EditableCell value={v.vendorCode || ''} placeholder="VEN00001"
+                    onSave={val => handleCellSave(v.id, 'vendorCode', val)}
+                    render={val => (
+                      <div style={{ display:'flex', alignItems:'center', gap:5 }}>
+                        <span style={{ fontFamily:"monospace", fontSize:11, background:"#F0FDFA", color:T.teal, padding:"2px 8px", borderRadius:5, fontWeight:700, whiteSpace:"nowrap" }}>{val || "—"}</span>
+                        {v.source === "auto-invoice" && <span style={{ fontSize:9, color:T.muted, fontFamily:"'DM Sans',sans-serif" }}>auto</span>}
+                      </div>
+                    )} />
                 </TD>
-
-                <TD bold>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: "'Plus Jakarta Sans',sans-serif", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 180 }}>{v.name}</div>
-                  {v.address && <div style={{ fontSize: 10, color: T.muted, fontFamily: "'DM Sans',sans-serif", marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 180 }}>{v.address.slice(0, 50)}{v.address.length > 50 ? "…" : ""}</div>}
-                </TD>
-
-                <TD><span style={{ fontFamily: "monospace", fontSize: 11, color: T.sub }}>{v.gstNumber || "—"}</span></TD>
-
-                <TD>{v.contactPerson || "—"}</TD>
 
                 <TD>
-                  {v.email
-                    ? <a href={`mailto:${v.email}`} style={{ color: T.indigo, fontSize: 12, fontFamily: "'DM Sans',sans-serif", textDecoration: "none" }}>{v.email}</a>
-                    : "—"}
+                  <EditableCell value={v.name || ''} placeholder="Vendor name"
+                    onSave={val => handleCellSave(v.id, 'name', val)}
+                    render={val => <div style={{ fontSize:13, fontWeight:700, color:T.text, fontFamily:"'Plus Jakarta Sans',sans-serif", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:180 }}>{val || <span style={{ color:'#C4C9D4', fontWeight:400, fontStyle:'italic' }}>—</span>}</div>} />
+                  <EditableCell value={v.address || ''} placeholder="Add address…"
+                    onSave={val => handleCellSave(v.id, 'address', val)}
+                    render={val => val
+                      ? <div style={{ fontSize:10, color:T.muted, fontFamily:"'DM Sans',sans-serif", marginTop:1, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:180 }}>{val.slice(0,50)}{val.length>50?"…":""}</div>
+                      : <div style={{ fontSize:10, color:'#C4C9D4', fontFamily:"'DM Sans',sans-serif", marginTop:1, fontStyle:'italic' }}>Add address…</div>} />
                 </TD>
-
-                <TD>{v.phone || "—"}</TD>
 
                 <TD>
-                  {v.category ? <Badge label={v.category} color={T.teal} bg="#F0FDFA"/> : "—"}
+                  <EditableCell value={v.gstNumber || ''} placeholder="29AAGCM2146G1ZV"
+                    onSave={val => handleCellSave(v.id, 'gstNumber', val)}
+                    render={val => <span style={{ fontFamily:"monospace", fontSize:11, color:val ? T.sub : '#C4C9D4', fontStyle:val?'normal':'italic' }}>{val || "—"}</span>} />
                 </TD>
+
+                <TD>
+                  <EditableCell value={v.contactPerson || ''} placeholder="Contact name"
+                    onSave={val => handleCellSave(v.id, 'contactPerson', val)} />
+                </TD>
+
+                <TD>
+                  <EditableCell value={v.email || ''} type="email" placeholder="email@vendor.com"
+                    onSave={val => handleCellSave(v.id, 'email', val)}
+                    render={val => val
+                      ? <a href={`mailto:${val}`} style={{ color:T.indigo, fontSize:12, fontFamily:"'DM Sans',sans-serif", textDecoration:"none" }} onClick={e => e.stopPropagation()}>{val}</a>
+                      : <span style={{ color:'#C4C9D4', fontSize:12, fontStyle:'italic' }}>—</span>} />
+                </TD>
+
+                <TD>
+                  <EditableCell value={v.phone || ''} placeholder="+91 98765 43210"
+                    onSave={val => handleCellSave(v.id, 'phone', val)} />
+                </TD>
+
+                <TD>
+                  <EditableCell value={v.category || ''} options={VCAT} placeholder="Category"
+                    onSave={val => handleCellSave(v.id, 'category', val)}
+                    render={val => val ? <Badge label={val} color={T.teal} bg="#F0FDFA"/> : <span style={{ color:'#C4C9D4', fontSize:12, fontStyle:'italic' }}>—</span>} />
+                </TD>
+
+                <td style={{ padding: "8px 16px", borderBottom: `1px solid ${T.border}` }}>
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:4, alignItems:'center', minWidth:160, maxWidth:260 }}>
+                    {(v.services || []).map(s => (
+                      <SvcChip key={s} label={s}
+                        onRemove={() => handleServiceUpdate(v.id, (v.services||[]).filter(x => x !== s))}
+                      />
+                    ))}
+                    <ServiceTagInput
+                      services={v.services || []}
+                      allServices={allServices}
+                      onSaved={next => handleServiceUpdate(v.id, next)}
+                    />
+                  </div>
+                </td>
 
                 <TD>
                   {v.createdAt
@@ -268,8 +559,8 @@ export default function Vendors() {
       </Card>
 
       {/* Modals */}
-      {showAdd && <VendorModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); }}/>}
-      {editV   && <VendorModal vendor={editV} onClose={() => setEditV(null)} onSaved={() => { setEditV(null); load(); }}/>}
+      {showAdd && <VendorModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); }} allServices={allServices}/>}
+      {editV   && <VendorModal vendor={editV} onClose={() => setEditV(null)} onSaved={() => { setEditV(null); load(); }} allServices={allServices}/>}
       {delV    && (
         <DeleteConfirm
           vendor={delV}

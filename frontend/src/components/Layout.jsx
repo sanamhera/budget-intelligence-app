@@ -11,10 +11,11 @@ import GavelIcon          from '@mui/icons-material/Gavel';
 import ReceiptIcon        from '@mui/icons-material/Receipt';
 import ReceiptLongIcon    from '@mui/icons-material/ReceiptLong';
 import StorefrontIcon     from '@mui/icons-material/Storefront';
+import PeopleIcon         from '@mui/icons-material/People';
 import LogoutIcon         from '@mui/icons-material/Logout';
 import { useAuth } from '../context/AuthContext';
 
-const nav = [
+const baseNav = [
   { path: '/',            label: 'Dashboard',   icon: <DashboardIcon/>      },
   { path: '/budgets',     label: 'Budgets',     icon: <AccountBalanceIcon/> },
   { path: '/nfa-tracker', label: 'NFA Tracker', icon: <GavelIcon/>          },
@@ -22,7 +23,9 @@ const nav = [
   { path: '/invoices',    label: 'Invoices',    icon: <ReceiptIcon/>        },
   { path: '/vendors',     label: 'Vendors',     icon: <StorefrontIcon/>     },
 ];
-// Payments removed from nav — route still in App.jsx if needed
+const adminNav = [
+  { path: '/users', label: 'Users', icon: <PeopleIcon /> },
+];
 
 const BAR_H = 56;
 
@@ -31,6 +34,7 @@ export default function Layout({ children }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout } = useAuth();
+  const nav = user?.role === 'Admin' ? [...baseNav, ...adminNav] : baseNav;
 
   return (
     <Box sx={{ display: 'flex', minHeight: '100vh', background: '#F5F7FA' }}>
