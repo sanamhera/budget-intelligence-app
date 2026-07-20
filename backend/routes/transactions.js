@@ -2,10 +2,12 @@
  * routes/transactions.js  — MongoDB
  */
 const express = require('express');
+const multer = require('multer');
 const { body, validationResult } = require('express-validator');
 const { Transaction } = require('../models');
 const { auth, requireRole } = require('../middleware/auth');
 const { toClient, parseObjectId } = require('../utils/toClient');
+const { uploadPdf } = require('../services/gcs');
 const {
   createTransaction,
   updateTransaction,
@@ -14,6 +16,8 @@ const {
 
 const router = express.Router();
 router.use(auth);
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 router.get('/', async (req, res) => {
   try {
@@ -40,6 +44,39 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+/** Upload a PDF to GCS and create a transaction with the durable /uploads URL (no base64). */
+router.post('/upload', requireRole('Admin', 'Finance', 'Requestor', 'Approver'), upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file || req.file.mimetype !== 'application/pdf') {
+      return res.status(400).json({ error: 'PDF file required' });
+    }
+    const { type, entityId, entityType, amount, description, status } = req.body;
+    if (!type || !entityId) return res.status(400).json({ error: 'type and entityId required' });
+
+    const folder =
+      type === 'PO' ? 'po-pdfs' :
+      type === 'INVOICE' ? 'invoice-pdfs' :
+      type === 'PAYMENT' ? 'payment-pdfs' : 'nfa-pdfs';
+
+    const fileUrl = await uploadPdf(folder, req.file.buffer, req.file.originalname);
+    const tx = await createTransaction({
+      type,
+      entityId,
+      entityType: entityType || 'Budget',
+      amount: Number(amount) || 0,
+      description: description || req.file.originalname,
+      fileUrl,
+      fileName: req.file.originalname,
+      status: status || 'Submitted',
+      user: req.user,
+    });
+    res.status(201).json(tx);
+  } catch (e) {
+    const statusCode = e.message.includes('NFA') || e.message.includes('PO') || e.message.includes('invoice') ? 422 : 500;
+    res.status(statusCode).json({ error: e.message });
+  }
+});
+
 router.post('/', [
   body('type').isIn(['NFA', 'PO', 'INVOICE', 'PAYMENT']),
   body('entityId').notEmpty(),
@@ -48,11 +85,16 @@ router.post('/', [
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
+    // Reject large base64 data URLs — PDFs must go through /upload → GCS
+    if (typeof req.body.fileUrl === 'string' && req.body.fileUrl.startsWith('data:')) {
+      return res.status(400).json({ error: 'Upload PDF via /api/transactions/upload (GCS). Base64 fileUrl is not allowed.' });
+    }
+
     const tx = await createTransaction({ ...req.body, user: req.user });
     res.status(201).json(tx);
   } catch (e) {
-    const status = e.message.includes('NFA') || e.message.includes('PO') || e.message.includes('invoice') ? 422 : 500;
-    res.status(status).json({ error: e.message });
+    const statusCode = e.message.includes('NFA') || e.message.includes('PO') || e.message.includes('invoice') ? 422 : 500;
+    res.status(statusCode).json({ error: e.message });
   }
 });
 

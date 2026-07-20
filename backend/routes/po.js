@@ -1,8 +1,6 @@
 /**
- * routes/po.js  — MongoDB
+ * routes/po.js  — MongoDB; PDFs stored in GCS (served via /uploads/po-pdfs)
  */
-const fs = require('fs').promises;
-const path = require('path');
 const express = require('express');
 const multer = require('multer');
 const { body, validationResult } = require('express-validator');
@@ -10,12 +8,11 @@ const { PO, Approval, ExpenseHead, Invoice, AuditLog } = require('../models');
 const { auth, requireRole } = require('../middleware/auth');
 const { toClient, parseObjectId } = require('../utils/toClient');
 const { parsePOPDF } = require('../services/gemini');
+const { uploadPdf } = require('../services/gcs');
 
 const router = express.Router();
 router.use(auth);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
-
-const uploadDir = path.join(__dirname, '..', 'uploads', 'po-pdfs');
 
 async function writeAudit(user, action, recordId, newValue) {
   try {
@@ -31,10 +28,7 @@ async function writeAudit(user, action, recordId, newValue) {
 }
 
 async function savePdf(buffer, originalName) {
-  await fs.mkdir(uploadDir, { recursive: true });
-  const safe = `${Date.now()}_${String(originalName).replace(/\s+/g, '_').replace(/[^a-zA-Z0-9._-]/g, '')}`;
-  await fs.writeFile(path.join(uploadDir, safe), buffer);
-  return `/uploads/po-pdfs/${safe}`;
+  return uploadPdf('po-pdfs', buffer, originalName);
 }
 
 router.post('/parse', requireRole('Admin', 'Finance', 'Requestor'), upload.single('file'), async (req, res) => {

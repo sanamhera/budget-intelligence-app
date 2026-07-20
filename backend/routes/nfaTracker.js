@@ -1,14 +1,13 @@
 /**
- * routes/nfaTracker.js  — MongoDB; PDFs stored on disk under /uploads/nfa-pdfs
+ * routes/nfaTracker.js  — MongoDB; PDFs stored in GCS (served via /uploads/nfa-pdfs)
  */
-const fs = require('fs').promises;
-const path = require('path');
 const express = require('express');
 const multer = require('multer');
 const { Approval, ExpenseHead, PO, Transaction, AuditLog } = require('../models');
 const { auth, requireRole } = require('../middleware/auth');
 const { toClient, parseObjectId } = require('../utils/toClient');
 const { parseNFAPDF } = require('../services/gemini');
+const { uploadPdf } = require('../services/gcs');
 
 const router = express.Router();
 router.use(auth);
@@ -21,8 +20,6 @@ const upload = multer({
       ? cb(null, true)
       : cb(new Error('Only PDF files are allowed')),
 });
-
-const uploadDir = path.join(__dirname, '..', 'uploads', 'nfa-pdfs');
 
 async function writeAudit(user, action, recordId, newValue) {
   try {
@@ -47,12 +44,8 @@ async function syncTransaction(sourceId, updates) {
   } catch {}
 }
 
-async function savePdfToDisk(buffer, originalName) {
-  await fs.mkdir(uploadDir, { recursive: true });
-  const safe = `${Date.now()}_${String(originalName).replace(/\s+/g, '_').replace(/[^a-zA-Z0-9._-]/g, '')}`;
-  const fp = path.join(uploadDir, safe);
-  await fs.writeFile(fp, buffer);
-  return `/uploads/nfa-pdfs/${safe}`;
+async function savePdf(buffer, originalName) {
+  return uploadPdf('nfa-pdfs', buffer, originalName);
 }
 
 router.post('/parse', requireRole('Admin', 'Finance', 'Requestor'), upload.single('file'), async (req, res) => {
@@ -92,7 +85,7 @@ router.post(
     try {
       if (!req.file) return res.status(400).json({ error: 'File required' });
 
-      const url = await savePdfToDisk(req.file.buffer, req.file.originalname);
+      const url = await savePdf(req.file.buffer, req.file.originalname);
       const fileName = req.file.originalname;
 
       if (req.body.approvalId) {
@@ -161,7 +154,7 @@ router.post(
       let pdfUrl = bodyPdfUrl || null;
       let pdfName = bodyPdfName || null;
       if (req.file) {
-        pdfUrl = await savePdfToDisk(req.file.buffer, req.file.originalname);
+        pdfUrl = await savePdf(req.file.buffer, req.file.originalname);
         pdfName = req.file.originalname;
       }
 

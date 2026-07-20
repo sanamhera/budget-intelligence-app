@@ -75,39 +75,29 @@ function NFAUploadCard({ entityId, entityType, onSaved }) {
 
   const handleFile = async (e) => {
     const file = e.target.files?.[0]; if (!file) return;
-    setUploading(true); setAiMsg('✨ AI reading document…');
-    const fileUrl = await new Promise(res => { const r = new FileReader(); r.onload = ev => res(ev.target.result); r.readAsDataURL(file); });
-    const rawText = await new Promise(res => {
-      const reader = new FileReader();
-      reader.onload = ev => {
-        const bin = ev.target.result;
-        const matches = bin.match(/\(([^)]{4,200})\)/g) || [];
-        const text = matches.map(m => m.slice(1,-1)).join(' ');
-        res(text.length > 50 ? text : bin.slice(0, 5000));
-      };
-      reader.readAsBinaryString(file);
-    });
-    let extractedAmount = null;
+    setUploading(true); setAiMsg('Uploading PDF to secure storage…');
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ model:'claude-sonnet-4-20250514', max_tokens:200,
-          messages:[{role:'user', content:'Extract the approved NFA/budget amount in INR. Return ONLY valid JSON: {"amount": <number or null>}\n\n'+rawText.slice(0,4000)}] }),
-      });
-      const d = await res.json();
-      extractedAmount = JSON.parse((d.content?.[0]?.text||'{}').replace(/```json|```/g,'').trim()).amount || null;
-    } catch {}
-    try {
-      const r = await fetch('/api/transactions', {
-        method:'POST', headers:hj(),
-        body: JSON.stringify({ type:'NFA', entityId, entityType, amount: extractedAmount||0, description: file.name, fileUrl, fileName: file.name, status:'Submitted' }),
-      });
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('type', 'NFA');
+      fd.append('entityId', entityId);
+      fd.append('entityType', entityType);
+      fd.append('amount', '0');
+      fd.append('description', file.name);
+      fd.append('status', 'Submitted');
+      const r = await fetch('/api/transactions/upload', { method: 'POST', headers: authH(), body: fd });
       if (r.ok) {
         const tx = await r.json();
-        if (extractedAmount) { setAiMsg(`AI extracted: ${fmt(extractedAmount)}`); onSaved(); }
-        else { setAiMsg('AI could not find an amount. Enter it manually.'); setPendingTx(tx); }
+        setAiMsg('PDF stored. Enter amount if needed.');
+        setPendingTx(tx);
+        onSaved();
+      } else {
+        const err = await r.json().catch(() => ({}));
+        setAiMsg(err.error || 'Upload failed');
       }
-    } catch {}
+    } catch {
+      setAiMsg('Upload failed');
+    }
     setUploading(false);
     if (fileRef.current) fileRef.current.value = '';
   };

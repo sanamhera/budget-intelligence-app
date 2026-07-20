@@ -1,5 +1,5 @@
 /**
- * routes/invoice.js  — MongoDB
+ * routes/invoice.js  — MongoDB; invoice PDFs stored in GCS
  */
 const express = require('express');
 const multer = require('multer');
@@ -10,6 +10,7 @@ const { parseInvoicePDF } = require('../services/gemini');
 const { getVendorGL, saveVendorGL } = require('../utils/vendorGL');
 const { createTransaction } = require('../services/transactionService');
 const { toClient, parseObjectId } = require('../utils/toClient');
+const { uploadPdf } = require('../services/gcs');
 
 const router = express.Router();
 router.use(auth);
@@ -108,10 +109,14 @@ router.post('/upload', requireRole('Admin', 'Requestor', 'Finance'), upload.sing
     const vendorGL = await getVendorGL(extracted.vendorName);
     if (vendorGL && extracted.lineItems?.length) extracted.lineItems[0].glCode = vendorGL;
 
+    const fileUrl = await uploadPdf('invoice-pdfs', req.file.buffer, req.file.originalname);
+
     res.json({
       preview: {
         budgetId,
         fileName: req.file.originalname,
+        fileUrl,
+        pdfUrl: fileUrl,
         vendorName: extracted.vendorName,
         invoiceNumber: extracted.invoiceNumber,
         amount: extracted.amount,
@@ -144,6 +149,9 @@ router.post('/confirm', requireRole('Admin', 'Requestor', 'Finance'), async (req
       nfaNumber: invoice.nfaNumber || null,
       poId: invoice.poId || null,
       poNumber: invoice.poNumber || null,
+      fileUrl: invoice.fileUrl || invoice.pdfUrl || null,
+      pdfUrl: invoice.fileUrl || invoice.pdfUrl || null,
+      fileName: invoice.fileName || null,
       status: 'Pending',
       paidAmount: 0,
       createdAt: new Date(),
@@ -163,6 +171,8 @@ router.post('/confirm', requireRole('Admin', 'Requestor', 'Finance'), async (req
       description: invoice.invoiceNumber ? `Invoice #${invoice.invoiceNumber}` : 'Invoice',
       status: 'Pending',
       sourceId: invId,
+      fileUrl: invoice.fileUrl || invoice.pdfUrl || null,
+      fileName: invoice.fileName || null,
       user: req.user,
     });
 

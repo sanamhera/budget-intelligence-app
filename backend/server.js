@@ -4,6 +4,7 @@ const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const { connectMongo } = require('./config/mongodb');
+const { streamUploadPath } = require('./services/gcs');
 
 const authRoutes = require('./routes/auth');
 const budgetRoutes = require('./routes/budget');
@@ -25,9 +26,15 @@ const budgetImportRoutes = require('./routes/budgetImport');
 const app = express();
 app.use(cors({ origin: true }));
 
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-app.use('/uploads', express.static(uploadsDir));
+// PDFs live in GCS; stream via /uploads/* (no local disk storage)
+app.get(/^\/uploads\/.+/, async (req, res) => {
+  try {
+    await streamUploadPath(req.path, res);
+  } catch (e) {
+    console.error('[uploads]', e.message);
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+  }
+});
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));

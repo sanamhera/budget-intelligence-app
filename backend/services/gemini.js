@@ -1,10 +1,31 @@
+/**
+ * Gemini via Vertex AI (GCP project billing / ADC on Cloud Run).
+ * Does not use AI Studio API keys.
+ */
 const { GoogleGenAI } = require("@google/genai");
 
 let _ai = null;
+
 function getAI() {
-  if (!_ai && process.env.GEMINI_API_KEY) {
-    _ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  if (_ai) return _ai;
+
+  const project =
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.GCP_PROJECT ||
+    process.env.GCLOUD_PROJECT;
+  const location = process.env.GOOGLE_CLOUD_LOCATION || "asia-south1";
+
+  if (!project) {
+    console.error("Vertex AI: GOOGLE_CLOUD_PROJECT is not set");
+    return null;
   }
+
+  _ai = new GoogleGenAI({
+    vertexai: true,
+    project,
+    location,
+  });
+  console.log(`Vertex AI Gemini client ready (project=${project}, location=${location})`);
   return _ai;
 }
 
@@ -230,6 +251,7 @@ function emptyPOResponse() {
 }
 
 module.exports = {
+  getAI,
   parseInvoicePDF,
   parseNFAPDF,
   parsePOPDF,

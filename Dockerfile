@@ -2,7 +2,8 @@
 FROM node:20-alpine AS frontend
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --omit=dev 2>/dev/null || npm install --omit=dev
+# Vite is a devDependency; include it for the build stage only
+RUN npm ci 2>/dev/null || npm install
 COPY frontend/ ./
 RUN npm run build
 

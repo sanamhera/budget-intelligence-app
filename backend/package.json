@@ -8,6 +8,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@google-cloud/storage": "^7.21.0",
     "@google/genai": "^1.41.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",

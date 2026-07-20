@@ -5,16 +5,13 @@ const express = require('express');
 const { Budget, Invoice, Payment, Approval, Vendor, ExpenseHead, Transaction } = require('../models');
 const { auth } = require('../middleware/auth');
 const { toClient } = require('../utils/toClient');
-
-let GoogleGenAI;
-try { ({ GoogleGenAI } = require('@google/genai')); } catch {}
+const { getAI } = require('../services/gemini');
 
 const router = express.Router();
 router.use(auth);
 
 const FY = 'FY 2026-27';
-const ai = GoogleGenAI && process.env.GEMINI_API_KEY
-  ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
+const ai = getAI();
 
 async function fetchAll() {
   const [b, i, p, a, v, eh, tx] = await Promise.all([
